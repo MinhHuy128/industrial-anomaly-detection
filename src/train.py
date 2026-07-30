@@ -18,6 +18,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.append(str(ROOT))
 
 from src.models.dinomaly_baseline import DinomalyBaseline
+from src.models.dinomaly_gct import DinomalyGCT
 
 def set_deterministic_seed(seed=42):
     """Enforce strict reproducibility across PyTorch, NumPy, and Python."""
@@ -79,6 +80,7 @@ def train(args):
     print(f"[SEED] Initialized to: {seed}")
     
     # Model Selection
+    if args.use_gct:
         print("[MODEL] Selected Dinomaly + Global Consistency Token (GCT)")
         model = DinomalyGCT(
             embed_dim=cfg["model"]["embed_dim"],
@@ -137,6 +139,9 @@ def train(args):
                     cls_token = features["x_norm_clstoken"]        # [B, 768]
                     
                 optimizer.zero_grad()
+                if args.use_gct:
+                    out_dict = model(patch_tokens, dinov2_cls_token=cls_token)
+                    loss = out_dict["total_loss"]
                 else:
                     rec_patches = model(patch_tokens)
                     loss = nn.functional.mse_loss(rec_patches, patch_tokens)
@@ -152,6 +157,9 @@ def train(args):
             dummy_cls = torch.randn(cfg["train"]["batch_size"], cfg["model"]["embed_dim"]).to(device)
             
             optimizer.zero_grad()
+            if args.use_gct:
+                out_dict = model(dummy_patch_tokens, dinov2_cls_token=dummy_cls)
+                loss = out_dict["total_loss"]
             else:
                 output = model(dummy_patch_tokens)
                 loss = nn.functional.mse_loss(output, dummy_patch_tokens)
