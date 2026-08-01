@@ -6,3 +6,8 @@ venv/
 .env
 .vscode/
 .DS_Store
+
+# Checkpoints & Experiments
+experiments/*.pth
+experiments/*.pt
+experiments/*.json
