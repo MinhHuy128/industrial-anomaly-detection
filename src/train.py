@@ -115,7 +115,7 @@ def train(args):
         ])
         dataset = datasets.ImageFolder(root=data_path, transform=transform)
         num_workers = 4 if torch.cuda.is_available() and not args.cpu else 0
-        dataloader = DataLoader(dataset, batch_size=cfg["train"]["batch_size"], shuffle=True, drop_last=True, num_workers=num_workers, pin_memory=False)
+        dataloader = DataLoader(dataset, batch_size=cfg["train"]["batch_size"], shuffle=True, drop_last=True, num_workers=num_workers, pin_memory=True)
     else:
         print("[DATASET] Using synthetic batching mode (Local dry-test or missing data folder).")
         dataloader = None
