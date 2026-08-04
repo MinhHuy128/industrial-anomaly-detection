@@ -212,10 +212,11 @@ def evaluate(args):
     # ── Load DINOv2-Register ─────────────────────────────────────────────────
     backbone = load_dinov2_register(device)
 
-    # ── Transform ────────────────────────────────────────────────────────────
+    # ── Transform (same as training: Resize(448,448) → CenterCrop(392)) ────
+    crop_size = cfg["dataset"]["crop_size"]   # 392
     transform = transforms.Compose([
-        transforms.Resize(img_size, interpolation=transforms.InterpolationMode.BICUBIC),
-        transforms.CenterCrop(img_size),
+        transforms.Resize((img_size, img_size), interpolation=transforms.InterpolationMode.BICUBIC),
+        transforms.CenterCrop(crop_size),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406],
                              std =[0.229, 0.224, 0.225]),
@@ -226,25 +227,19 @@ def evaluate(args):
     good_dir   = test_path / "good"
     sample_imgs = sorted(list(good_dir.glob("*.png")) + list(good_dir.glob("*.jpg")))
 
-    if len(sample_imgs) > 0:
-        sample_img = Image.open(sample_imgs[0]).convert("RGB")
-        dummy_t    = transform(sample_img).unsqueeze(0).to(device)
-    else:
-        dummy_t = torch.randn(1, 3, img_size, img_size).to(device)
+    if len(sample_imgs) == 0:
+        raise FileNotFoundError(f"[ERROR] No 'good' test images found in: {good_dir}")
 
-    # Warmup
+    # Warmup (10 runs to initialize CUDA kernels)
     for _ in range(10):
-        infer_one(backbone, model, sample_imgs[0] if sample_imgs else None,
-                  transform, device, use_gct, target_layers, img_size)
+        infer_one(backbone, model, sample_imgs[0], transform, device, use_gct, target_layers, img_size)
 
     # Benchmark 50 runs
     if device.type == "cuda":
         torch.cuda.synchronize()
     t0 = time.time()
     for _ in range(50):
-        if sample_imgs:
-            infer_one(backbone, model, sample_imgs[0], transform, device,
-                      use_gct, target_layers, img_size)
+        infer_one(backbone, model, sample_imgs[0], transform, device, use_gct, target_layers, img_size)
     if device.type == "cuda":
         torch.cuda.synchronize()
     latency_ms = (time.time() - t0) / 50 * 1000.0

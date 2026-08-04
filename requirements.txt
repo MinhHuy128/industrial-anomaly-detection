@@ -2,5 +2,5 @@ torch
 torchvision
 numpy
 pillow
-kaggle
 scikit-learn
+scipy
