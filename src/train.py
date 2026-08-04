@@ -30,6 +30,18 @@ from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
 from PIL import Image
 
+try:
+    from torch.utils.tensorboard import SummaryWriter
+except Exception:
+    SummaryWriter = None
+
+try:
+    import matplotlib
+    matplotlib.use("Agg", force=True)
+    import matplotlib.pyplot as plt
+except Exception:
+    plt = None
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.append(str(ROOT))
 
@@ -104,6 +116,28 @@ def load_config(config_path: str) -> dict:
             return yaml.safe_load(f)
     except ImportError:
         raise RuntimeError("PyYAML not installed. Use .json config.")
+
+
+def save_loss_curve(save_path: Path, iter_history, loss_history, gct_history=None):
+    if plt is None:
+        print("[WARN] matplotlib not available; skipping loss curve export.")
+        return
+
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(9, 5))
+    ax.plot(iter_history, loss_history, label="Total Loss", linewidth=2)
+
+    if gct_history is not None and any(value != 0.0 for value in gct_history):
+        ax.plot(iter_history, gct_history, label="GCT Loss", linewidth=2, alpha=0.9)
+
+    ax.set_title("Training Loss Curve")
+    ax.set_xlabel("Iteration")
+    ax.set_ylabel("Loss")
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(save_path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -227,6 +261,7 @@ def train(args):
     HM_FACTOR    = cfg.get("train", {}).get("hm_factor", 0.1)
     SAVE_DIR     = ROOT / cfg["train"]["save_dir"]
     TARGET_LAYERS = cfg.get("model", {}).get("target_layers", [2, 3, 4, 5, 6, 7, 8, 9])
+    timestamp = time.strftime("%Y%m%d-%H%M%S")
 
     # ── Dataset ────────────────────────────────────────────────────────────
     data_root = ROOT / cfg["dataset"]["data_path"] / category
@@ -275,13 +310,38 @@ def train(args):
     )
     scheduler  = WarmCosineScheduler(optimizer, BASE_LR, FINAL_LR, TOTAL_ITERS, WARMUP_ITERS)
 
+    # ── Artifacts / Logging ────────────────────────────────────────────────
+    save_path = SAVE_DIR / ("gct" if use_gct else "baseline")
+    save_path.mkdir(parents=True, exist_ok=True)
+    log_path = save_path / "train.log"
+    tb_writer = None
+    if SummaryWriter is not None:
+        tb_dir = save_path / "tensorboard" / f"{category}_{timestamp}"
+        tb_writer = SummaryWriter(log_dir=str(tb_dir))
+        print(f"[TENSORBOARD] Writing events to: {tb_dir.relative_to(ROOT)}")
+    else:
+        print("[WARN] torch.utils.tensorboard unavailable; continuing without TensorBoard.")
+
+    def log_message(message: str):
+        print(message)
+        with open(log_path, "a", encoding="utf-8") as log_file:
+            log_file.write(message + "\n")
+
+    iter_history = []
+    loss_history = []
+    gct_history = []
+    lr_history = []
+
+    log_message(f"[RUN] {timestamp} | model={model_name} | category={category} | config={args.config}")
+    log_message(f"[RUN] train.log => {log_path.relative_to(ROOT)}")
+
     # ── Training Loop (iteration-based, not epoch-based) ──────────────────
     model.train()
     data_iter  = iter(loader)
     start_time = time.time()
     loss_accum = []
 
-    print(f"[TRAIN] Starting training loop for {TOTAL_ITERS} iterations...")
+    log_message(f"[TRAIN] Starting training loop for {TOTAL_ITERS} iterations...")
 
     for it in range(TOTAL_ITERS):
         # Infinite data iterator
@@ -307,40 +367,78 @@ def train(args):
             # Progressive p warmup: paper uses p = min(0.9 * it/1000, 0.9)
             p_curr = min(HM_P * it / 1000.0, HM_P)
             loss = combined_loss(en, de, gct_loss, p=p_curr, factor=HM_FACTOR, gct_lambda=GCT_LAMBDA)
+            gct_loss_value = float(gct_loss.item())
         else:
             en, de = model(feat_list)
             # Progressive p warmup (same curriculum as paper)
             p_curr = min(HM_P * it / 1000.0, HM_P)
             loss = global_cosine_hm_percent(en, de, p=p_curr, factor=HM_FACTOR)
+            gct_loss_value = 0.0
 
         loss.backward()
         nn.utils.clip_grad_norm_(trainable_params, max_norm=0.1)
         optimizer.step()
         scheduler.step()
 
+        iter_idx = it + 1
+        loss_value = float(loss.item())
         loss_accum.append(loss.item())
+        iter_history.append(iter_idx)
+        loss_history.append(loss_value)
+        gct_history.append(gct_loss_value)
+        lr_history.append(float(optimizer.param_groups[0]["lr"]))
+
+        if tb_writer is not None:
+            tb_writer.add_scalar("train/loss", loss_value, iter_idx)
+            tb_writer.add_scalar("train/lr", optimizer.param_groups[0]["lr"], iter_idx)
+            tb_writer.add_scalar("train/p_curr", p_curr, iter_idx)
+            if use_gct:
+                tb_writer.add_scalar("train/gct_loss", gct_loss_value, iter_idx)
 
         # Logging every 100 iters
-        if (it + 1) % 100 == 0:
+        if iter_idx % 100 == 0:
             elapsed = time.time() - start_time
             avg_loss = np.mean(loss_accum)
-            speed = elapsed / (it + 1)
+            speed = elapsed / iter_idx
             remaining = speed * (TOTAL_ITERS - it - 1)
-            print(f"  [Iter {it+1:05d}/{TOTAL_ITERS}] "
-                  f"Loss: {avg_loss:.6f}  "
-                  f"LR: {optimizer.param_groups[0]['lr']:.2e}  "
-                  f"Elapsed: {elapsed:.0f}s  "
-                  f"ETA: {remaining:.0f}s")
+            log_message(f"  [Iter {iter_idx:05d}/{TOTAL_ITERS}] "
+                        f"Loss: {avg_loss:.6f}  "
+                        f"LR: {optimizer.param_groups[0]['lr']:.2e}  "
+                        f"Elapsed: {elapsed:.0f}s  "
+                        f"ETA: {remaining:.0f}s")
             loss_accum = []
 
     total_time = time.time() - start_time
-    print(f"[SUCCESS] Training completed in {total_time:.1f} seconds.")
+    log_message(f"[SUCCESS] Training completed in {total_time:.1f} seconds.")
+
+    curve_path = save_path / "loss_curve.png"
+    save_loss_curve(curve_path, iter_history, loss_history, gct_history)
+    log_message(f"[SAVED] Loss curve saved to: {curve_path.relative_to(ROOT)}")
+
+    manifest = {
+        "timestamp": timestamp,
+        "config": str(Path(args.config).as_posix()),
+        "category": category,
+        "model_name": model_name,
+        "use_gct": use_gct,
+        "seed": SEED,
+        "total_iters": TOTAL_ITERS,
+        "batch_size": BATCH_SIZE,
+        "img_size": IMG_SIZE,
+        "crop_size": CROP_SIZE,
+        "checkpoint": str((save_path / f"{'gct' if use_gct else 'baseline'}_{category}_strict.pth").relative_to(ROOT)),
+        "train_log": str(log_path.relative_to(ROOT)),
+        "loss_curve": str(curve_path.relative_to(ROOT)),
+        "tensorboard": str((save_path / "tensorboard" / f"{category}_{timestamp}").relative_to(ROOT)) if tb_writer is not None else None,
+    }
+    manifest_path = save_path / "run_manifest.json"
+    with open(manifest_path, "w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=2, ensure_ascii=False)
+    log_message(f"[SAVED] Run manifest saved to: {manifest_path.relative_to(ROOT)}")
 
     # ── Save Checkpoint ────────────────────────────────────────────────────
     prefix    = "gct" if use_gct else "baseline"
     subfolder = "gct" if use_gct else "baseline"
-    save_path = SAVE_DIR / subfolder
-    save_path.mkdir(parents=True, exist_ok=True)
     ckpt_path = save_path / f"{prefix}_{category}_strict.pth"
 
     # Only save trainable parameters (backbone is frozen, not included)
@@ -351,7 +449,10 @@ def train(args):
         "total_iters": TOTAL_ITERS,
     }
     torch.save(save_dict, ckpt_path)
-    print(f"[SAVED] Checkpoint saved to: {ckpt_path.relative_to(ROOT)}")
+    log_message(f"[SAVED] Checkpoint saved to: {ckpt_path.relative_to(ROOT)}")
+
+    if tb_writer is not None:
+        tb_writer.close()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
