@@ -1,0 +1,41 @@
+{
+  "project": {
+    "name": "Dinomaly_Baseline_LOCO",
+    "seed": 42,
+    "device": "cuda"
+  },
+  "dataset": {
+    "name": "mvtec_loco",
+    "data_path": "data/mvtec_loco",
+    "img_size": 448,
+    "crop_size": 448,
+    "categories": [
+      "breakfast_box",
+      "juice_bottle",
+      "pushpins",
+      "screw_bag",
+      "splicing_connectors"
+    ]
+  },
+  "train": {
+    "batch_size": 4,
+    "accum_steps": 2,
+    "epochs": 100,
+    "learning_rate": 0.0001,
+    "weight_decay": 0.0001,
+    "save_dir": "experiments"
+  },
+  "model": {
+    "backbone": "dinov2_vitb14",
+    "decoder_layers": 8,
+    "embed_dim": 768
+  },
+  "eval": {
+    "metrics": [
+      "auroc_logical",
+      "auroc_structural",
+      "auroc_mean",
+      "spro_pixel"
+    ]
+  }
+}
