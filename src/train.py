@@ -28,19 +28,12 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
-from PIL import Image
+from PIL import Image, ImageDraw
 
 try:
     from torch.utils.tensorboard import SummaryWriter
 except Exception:
     SummaryWriter = None
-
-try:
-    import matplotlib
-    matplotlib.use("Agg", force=True)
-    import matplotlib.pyplot as plt
-except Exception:
-    plt = None
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.append(str(ROOT))
@@ -119,25 +112,67 @@ def load_config(config_path: str) -> dict:
 
 
 def save_loss_curve(save_path: Path, iter_history, loss_history, gct_history=None):
-    if plt is None:
-        print("[WARN] matplotlib not available; skipping loss curve export.")
+    if not iter_history or not loss_history:
+        print("[WARN] No training history available; skipping loss curve export.")
         return
 
     save_path.parent.mkdir(parents=True, exist_ok=True)
-    fig, ax = plt.subplots(figsize=(9, 5))
-    ax.plot(iter_history, loss_history, label="Total Loss", linewidth=2)
+    width, height = 1400, 800
+    margin_left, margin_right = 90, 30
+    margin_top, margin_bottom = 70, 80
+    plot_w = width - margin_left - margin_right
+    plot_h = height - margin_top - margin_bottom
 
+    image = Image.new("RGB", (width, height), "white")
+    draw = ImageDraw.Draw(image)
+
+    values = list(loss_history)
     if gct_history is not None and any(value != 0.0 for value in gct_history):
-        ax.plot(iter_history, gct_history, label="GCT Loss", linewidth=2, alpha=0.9)
+        values.extend(gct_history)
 
-    ax.set_title("Training Loss Curve")
-    ax.set_xlabel("Iteration")
-    ax.set_ylabel("Loss")
-    ax.grid(True, alpha=0.3)
-    ax.legend()
-    fig.tight_layout()
-    fig.savefig(save_path, dpi=200, bbox_inches="tight")
-    plt.close(fig)
+    min_loss = min(values)
+    max_loss = max(values)
+    if max_loss <= min_loss:
+        max_loss = min_loss + 1.0
+
+    def x_pos(index: int) -> float:
+        if len(iter_history) == 1:
+            return margin_left + plot_w / 2.0
+        return margin_left + (index / (len(iter_history) - 1)) * plot_w
+
+    def y_pos(value: float) -> float:
+        return margin_top + (max_loss - value) / (max_loss - min_loss) * plot_h
+
+    # Axes and grid
+    draw.line((margin_left, margin_top, margin_left, margin_top + plot_h), fill="black", width=2)
+    draw.line((margin_left, margin_top + plot_h, margin_left + plot_w, margin_top + plot_h), fill="black", width=2)
+
+    for frac in [0.25, 0.5, 0.75]:
+        y = margin_top + plot_h * frac
+        draw.line((margin_left, y, margin_left + plot_w, y), fill=(220, 220, 220), width=1)
+
+    def draw_polyline(series, color):
+        if series is None:
+            return
+        points = [(x_pos(i), y_pos(float(value))) for i, value in enumerate(series)]
+        if len(points) >= 2:
+            draw.line(points, fill=color, width=4)
+        for x, y in points[::max(1, len(points) // 50)]:
+            draw.ellipse((x - 2, y - 2, x + 2, y + 2), fill=color)
+
+    draw_polyline(loss_history, (31, 119, 180))
+    if gct_history is not None and any(value != 0.0 for value in gct_history):
+        draw_polyline(gct_history, (214, 39, 40))
+
+    title = "Training Loss Curve"
+    draw.text((margin_left, 20), title, fill="black")
+    draw.text((margin_left, height - 45), "Iteration", fill="black")
+    draw.text((15, margin_top), "Loss", fill="black")
+    draw.text((margin_left + 20, 40), "Blue: Total Loss", fill=(31, 119, 180))
+    if gct_history is not None and any(value != 0.0 for value in gct_history):
+        draw.text((margin_left + 220, 40), "Red: GCT Loss", fill=(214, 39, 40))
+
+    image.save(save_path)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -411,7 +446,7 @@ def train(args):
     total_time = time.time() - start_time
     log_message(f"[SUCCESS] Training completed in {total_time:.1f} seconds.")
 
-    curve_path = save_path / "loss_curve.png"
+    curve_path = save_path / f"loss_curve_{category}_{timestamp}.png"
     save_loss_curve(curve_path, iter_history, loss_history, gct_history)
     log_message(f"[SAVED] Loss curve saved to: {curve_path.relative_to(ROOT)}")
 
@@ -431,7 +466,7 @@ def train(args):
         "loss_curve": str(curve_path.relative_to(ROOT)),
         "tensorboard": str((save_path / "tensorboard" / f"{category}_{timestamp}").relative_to(ROOT)) if tb_writer is not None else None,
     }
-    manifest_path = save_path / "run_manifest.json"
+    manifest_path = save_path / f"run_manifest_{category}_{timestamp}.json"
     with open(manifest_path, "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2, ensure_ascii=False)
     log_message(f"[SAVED] Run manifest saved to: {manifest_path.relative_to(ROOT)}")
