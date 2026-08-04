@@ -1,0 +1,47 @@
+{
+  "project": {
+    "name": "Dinomaly_GCT_PaperStrict",
+    "seed": 42,
+    "device": "cuda"
+  },
+  "dataset": {
+    "name": "mvtec_loco",
+    "data_path": "data/mvtec_loco",
+    "img_size": 448,
+    "crop_size": 392,
+    "categories": [
+      "breakfast_box",
+      "juice_bottle",
+      "pushpins",
+      "screw_bag",
+      "splicing_connectors"
+    ]
+  },
+  "train": {
+    "total_iters": 5000,
+    "batch_size": 16,
+    "learning_rate": 0.002,
+    "final_lr": 0.0002,
+    "warmup_iters": 100,
+    "weight_decay": 0.0001,
+    "gct_lambda": 0.1,
+    "hm_p": 0.9,
+    "hm_factor": 0.1,
+    "save_dir": "experiments"
+  },
+  "model": {
+    "backbone": "dinov2reg_vit_base_14",
+    "embed_dim": 768,
+    "num_heads": 12,
+    "decoder_layers": 8,
+    "target_layers": [2, 3, 4, 5, 6, 7, 8, 9],
+    "fuse_layer_encoder": [[0,1,2,3],[4,5,6,7]],
+    "fuse_layer_decoder": [[0,1,2,3],[4,5,6,7]]
+  },
+  "eval": {
+    "metrics": ["auroc_logical", "auroc_structural", "auroc_mean", "spro_pixel"],
+    "anomaly_score": "cosine_distance",
+    "top_ratio": 0.01,
+    "gaussian_sigma": 4
+  }
+}
