@@ -75,7 +75,7 @@ class MVTecLocoTrainDataset(Dataset):
             raise RuntimeError(f"No training images found in: {train_dir}")
 
         self.transform = transforms.Compose([
-            transforms.Resize(img_size, interpolation=transforms.InterpolationMode.BICUBIC),
+            transforms.Resize((img_size, img_size), interpolation=transforms.InterpolationMode.BICUBIC),
             transforms.CenterCrop(crop_size),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406],
@@ -304,10 +304,14 @@ def train(args):
 
         if use_gct:
             en, de, gct_loss = model(feat_list, cls_token)
-            loss = combined_loss(en, de, gct_loss, p=HM_P, factor=HM_FACTOR, gct_lambda=GCT_LAMBDA)
+            # Progressive p warmup: paper uses p = min(0.9 * it/1000, 0.9)
+            p_curr = min(HM_P * it / 1000.0, HM_P)
+            loss = combined_loss(en, de, gct_loss, p=p_curr, factor=HM_FACTOR, gct_lambda=GCT_LAMBDA)
         else:
             en, de = model(feat_list)
-            loss = global_cosine_hm_percent(en, de, p=HM_P, factor=HM_FACTOR)
+            # Progressive p warmup (same curriculum as paper)
+            p_curr = min(HM_P * it / 1000.0, HM_P)
+            loss = global_cosine_hm_percent(en, de, p=p_curr, factor=HM_FACTOR)
 
         loss.backward()
         nn.utils.clip_grad_norm_(trainable_params, max_norm=0.1)

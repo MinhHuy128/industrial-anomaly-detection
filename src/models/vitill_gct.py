@@ -72,15 +72,19 @@ def extract_intermediate_features(
 class GCTModule(nn.Module):
     """
     Global Consistency Token (GCT):
-      - A learnable token that is conditioned on the DINOv2 CLS embedding.
-      - Injected into the token sequence after Bottleneck.
-      - Trained via Cosine Distance Loss against the (frozen) DINOv2 CLS token.
+      - A learnable token injected into the token sequence after Bottleneck.
+      - Passes through all 8 Decoder Blocks (attends to all patch tokens).
+      - AFTER decoder, the final GCT output is supervised via Cosine Distance
+        Loss against the frozen DINOv2 CLS token.
 
-    This forces the Decoder to maintain global semantic consistency,
-    improving detection of Logical Anomalies.
+    Design rationale:
+      Supervision on the FINAL decoder output (not the initial parameter) forces
+      the decoder to aggregate global semantic context through the attention
+      mechanism — this is the key mechanism enabling logical anomaly detection.
 
-    Loss formula:
-      L_gct = 1 - cosine_similarity(proj(gct_output), cls_token.detach())
+    Loss formula (computed in ViTillGCT.forward after decoder):
+      gct_final = decoder_output[:, 0, :]   # GCT token position
+      L_gct = 1 - cosine_similarity(proj(gct_final), cls_token.detach())
     """
     def __init__(self, embed_dim: int = 768):
         super().__init__()
@@ -95,27 +99,25 @@ class GCTModule(nn.Module):
             nn.Linear(embed_dim, embed_dim),
         )
 
-    def forward(self, x: torch.Tensor, cls_token: torch.Tensor):
-        """
-        Args:
-            x:         [B, N, C] — token sequence from Bottleneck
-            cls_token: [B, C]    — DINOv2 CLS token (DETACHED — backbone frozen)
-        Returns:
-            x_with_gct: [B, N+1, C] — sequence with GCT token prepended
-            gct_loss:   scalar      — cosine distance loss
-        """
+    def prepend(self, x: torch.Tensor) -> torch.Tensor:
+        """Prepend GCT token to token sequence. [B,N,C] → [B,N+1,C]"""
         B = x.shape[0]
         gct = self.gct_token.expand(B, -1, -1)  # [B, 1, C]
-        x_with_gct = torch.cat([gct, x], dim=1)  # [B, N+1, C]
+        return torch.cat([gct, x], dim=1)        # [B, N+1, C]
 
-        # Compute GCT loss
-        # gct_output: the GCT token at end of decoder (retrieved externally)
-        # here we use the initial GCT as proxy; actual loss uses final GCT output
-        proj_gct = self.projection_head(gct.squeeze(1))  # [B, C]
-        cls_detached = cls_token.detach()                # NO gradient to backbone!
-        gct_loss = (1.0 - F.cosine_similarity(proj_gct, cls_detached, dim=-1)).mean()
+    def compute_loss(self, gct_final: torch.Tensor, cls_token: torch.Tensor) -> torch.Tensor:
+        """
+        Compute GCT loss on the FINAL decoder output of the GCT position.
 
-        return x_with_gct, gct_loss
+        Args:
+            gct_final: [B, C] — GCT token output from LAST decoder block
+            cls_token: [B, C] — DINOv2 CLS token (detach() is applied here)
+        Returns:
+            scalar loss
+        """
+        proj_gct = self.projection_head(gct_final)         # [B, C]
+        cls_detached = cls_token.detach()                  # NO gradient to backbone!
+        return (1.0 - F.cosine_similarity(proj_gct, cls_detached, dim=-1)).mean()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -192,12 +194,12 @@ class ViTillGCT(nn.Module):
         """
         Args:
             feat_list: list of [B, N, C] tensors (8 intermediate encoder layers)
-            cls_token: [B, C] DINOv2 CLS token (already detached from backbone grad)
+            cls_token: [B, C] DINOv2 CLS token (from backbone, will be detached in gct.compute_loss)
 
-        Returns (training):
+        Returns:
             en:       list of [B, C, H, W] fused encoder feature maps
             de:       list of [B, C, H, W] fused decoder feature maps
-            gct_loss: scalar GCT cosine distance loss
+            gct_loss: scalar GCT cosine distance loss (on FINAL decoder GCT output)
         """
         # Fuse encoder features into single representation
         x = self.fuse_features(feat_list, list(range(len(feat_list))))  # [B, N, C]
@@ -205,15 +207,22 @@ class ViTillGCT(nn.Module):
         # Bottleneck
         x = self.bottleneck(x)  # [B, N, C]
 
-        # Inject GCT token (prepended to sequence)
-        x, gct_loss = self.gct(x, cls_token)  # [B, N+1, C]
+        # Inject GCT token (prepended at position 0)
+        x = self.gct.prepend(x)  # [B, N+1, C]
 
         # Decode through 8 LinearAttention blocks, collect all outputs
         de_list = []
         for blk in self.decoder:
             x = blk(x)
-            # Remove GCT token before collecting decoder features
-            de_list.append(x[:, 1:, :])  # [B, N, C] — strip GCT token
+            # Strip GCT token (position 0) before collecting patch decoder features
+            de_list.append(x[:, 1:, :])  # [B, N, C]
+
+        # ✅ GCT loss on FINAL decoder output — x[:, 0, :] is the GCT token
+        # after attending to ALL patch tokens through all 8 decoder blocks.
+        # This is the correct supervision point: the decoder has aggregated
+        # global context into the GCT token, and we supervise it against CLS.
+        gct_final = x[:, 0, :]                            # [B, C]
+        gct_loss  = self.gct.compute_loss(gct_final, cls_token)
 
         de_list = de_list[::-1]  # Reverse for layer ordering (paper convention)
 
