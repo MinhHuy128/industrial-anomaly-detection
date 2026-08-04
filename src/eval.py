@@ -109,7 +109,8 @@ def compute_spro_approx(backbone, model, test_path, device, transform, is_gct, i
     If ground truth masks are unavailable, returns -1.0 to indicate not computed.
     """
     from PIL import Image
-    gt_root = test_path / "ground_truth"
+    # MVTec LOCO AD: ground_truth is at category level (sibling of test/)
+    gt_root = test_path.parent / "ground_truth"
     anomaly_dirs = ["logical_anomalies", "structural_anomalies"]
 
     all_gt_masks = []
@@ -126,9 +127,13 @@ def compute_spro_approx(backbone, model, test_path, device, transform, is_gct, i
             list(anom_dir.glob("*.jpg"))
         )
         for p in img_paths:
-            # GT mask
-            mask_name = p.stem + ".png"
-            mask_path = gt_dir / mask_name
+            # GT mask — MVTec LOCO stores masks in subfolder per image:
+            # ground_truth/<anom_type>/<stem>/<stem>.png (e.g. 000/000.png)
+            stem = p.stem
+            mask_path = gt_dir / stem / (stem + ".png")
+            if not mask_path.exists():
+                # Fallback: flat layout (gt_dir/<stem>.png)
+                mask_path = gt_dir / (stem + ".png")
             if not mask_path.exists():
                 continue
 
