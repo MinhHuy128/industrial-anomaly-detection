@@ -1,27 +1,47 @@
+"""
+Training script for ViTill-GCT (Paper-Strict Branch).
+
+Faithful to Dinomaly paper training protocol:
+  - Iteration-based: 5000 iterations (not epoch-based)
+  - Batch size: 16
+  - Image size: 448, Crop size: 392
+  - Optimizer: StableAdamW(lr=2e-3, betas=(0.9,0.999), wd=1e-4, amsgrad=True)
+  - Scheduler: WarmCosineScheduler(base=2e-3, final=2e-4, warmup=100)
+  - Loss: global_cosine_hm_percent(p=0.9, factor=0.1) + λ×GCT_cosine_loss
+  - Grad clipping: max_norm=0.1
+
+Reference: Kang et al., "Dinomaly: The Less Is More...", arXiv 2405.14325
+"""
 import sys
 if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8')
 
 import argparse
+import json
+import math
 import random
 import time
-import json
+from pathlib import Path
+
 import numpy as np
 import torch
 import torch.nn as nn
-from torchvision import transforms, datasets
-from torch.utils.data import DataLoader
-from pathlib import Path
+from torch.utils.data import DataLoader, Dataset
+from torchvision import transforms
+from PIL import Image
 
-# Paths
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.append(str(ROOT))
 
-from src.models.dinomaly_baseline import DinomalyBaseline
-from src.models.dinomaly_gct import DinomalyGCT
+from src.models.vitill_gct import ViTillGCT, ViTillBaseline, load_dinov2_register, extract_intermediate_features
+from src.losses.cosine_loss import combined_loss, global_cosine_hm_percent
 
-def set_deterministic_seed(seed=42):
-    """Enforce strict reproducibility across PyTorch, NumPy, and Python."""
+# ─────────────────────────────────────────────────────────────────────────────
+# REPRODUCIBILITY
+# ─────────────────────────────────────────────────────────────────────────────
+SEED = 42
+
+def set_deterministic(seed=SEED):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -30,171 +50,312 @@ def set_deterministic_seed(seed=42):
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
 
-def load_config(config_path):
+# ─────────────────────────────────────────────────────────────────────────────
+# DATASET
+# ─────────────────────────────────────────────────────────────────────────────
+class MVTecLocoTrainDataset(Dataset):
+    """
+    Loads 'good' training images from MVTec LOCO AD.
+    Uses same transforms as Dinomaly paper:
+      - Resize to 448
+      - CenterCrop 392
+      - Normalize with ImageNet stats
+    """
+    def __init__(self, category_root: Path, img_size: int = 448, crop_size: int = 392):
+        train_dir = category_root / "train" / "good"
+        if not train_dir.exists():
+            raise FileNotFoundError(f"Training dir not found: {train_dir}")
+
+        self.img_paths = sorted(
+            list(train_dir.glob("*.png")) +
+            list(train_dir.glob("*.jpg")) +
+            list(train_dir.glob("*.bmp"))
+        )
+        if len(self.img_paths) == 0:
+            raise RuntimeError(f"No training images found in: {train_dir}")
+
+        self.transform = transforms.Compose([
+            transforms.Resize(img_size, interpolation=transforms.InterpolationMode.BICUBIC),
+            transforms.CenterCrop(crop_size),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                 std =[0.229, 0.224, 0.225]),
+        ])
+
+    def __len__(self):
+        return len(self.img_paths)
+
+    def __getitem__(self, idx):
+        img = Image.open(self.img_paths[idx]).convert("RGB")
+        return self.transform(img)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LOAD CONFIG
+# ─────────────────────────────────────────────────────────────────────────────
+def load_config(config_path: str) -> dict:
     path = Path(config_path)
     if path.suffix == ".json":
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
-    else:
-        try:
-            import yaml
-            with open(path, "r", encoding="utf-8") as f:
-                return yaml.safe_load(f)
-        except ImportError:
-            json_path = path.with_suffix(".json")
-            if json_path.exists():
-                with open(json_path, "r", encoding="utf-8") as f:
-                    return json.load(f)
-            raise RuntimeError("PyYAML not installed. Please use .json config file.")
-
-def load_dinov2_backbone(device):
-    """Load pretrained DINOv2 ViT-B/14 backbone and freeze parameters."""
-    print("[BACKBONE] Loading pretrained DINOv2 ViT-B/14 encoder...")
     try:
-        backbone = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitb14').to(device)
-        backbone.eval()
-        for param in backbone.parameters():
-            param.requires_grad = False
-        print("[BACKBONE] Successfully loaded and frozen DINOv2 backbone.")
-        return backbone
-    except Exception as e:
-        print(f"[WARNING] Could not load torch.hub DINOv2: {e}")
-        print("          Falling back to synthetic feature extraction mode.")
-        return None
+        import yaml
+        with open(path, "r", encoding="utf-8") as f:
+            return yaml.safe_load(f)
+    except ImportError:
+        raise RuntimeError("PyYAML not installed. Use .json config.")
 
-def train(args):
-    # Load Config
-    cfg = load_config(args.config)
-    seed = cfg["project"]["seed"]
-    set_deterministic_seed(seed)
-    
-    # Device setup
-    if args.cpu or not torch.cuda.is_available():
-        device = torch.device("cpu")
-        print("[INFO] Running in CPU Mode")
-    else:
-        device = torch.device(cfg["project"]["device"])
-        print(f"[INFO] Using GPU: {torch.cuda.get_device_name(0)}")
-        
-    print(f"[TARGET] Category: {args.category}")
-    print(f"[SEED] Initialized to: {seed}")
-    
-    # Model Selection
-    if args.use_gct:
-        print("[MODEL] Selected Dinomaly + Global Consistency Token (GCT)")
-        model = DinomalyGCT(
-            embed_dim=cfg["model"]["embed_dim"],
-            num_decoder_layers=cfg["model"]["decoder_layers"]
-        ).to(device)
-    else:
-        print("[MODEL] Selected Dinomaly Baseline")
-        model = DinomalyBaseline(
-            embed_dim=cfg["model"]["embed_dim"],
-            num_decoder_layers=cfg["model"]["decoder_layers"]
-        ).to(device)
-        
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=cfg["train"]["learning_rate"],
-        weight_decay=cfg["train"]["weight_decay"]
-    )
-    
-    # DINOv2 Backbone
-    backbone = load_dinov2_backbone(device) if not args.cpu else None
-    
-    # Dataset Loading Setup
-    data_path = ROOT / cfg["dataset"]["data_path"] / args.category / "train"
-    use_real_data = data_path.exists() and not args.cpu
-    
-    if use_real_data:
-        print(f"[DATASET] Loading real MVTec LOCO AD images from: {data_path}")
-        transform = transforms.Compose([
-            transforms.Resize((cfg["dataset"]["img_size"], cfg["dataset"]["img_size"])),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-        ])
-        dataset = datasets.ImageFolder(root=data_path, transform=transform)
-        num_workers = 4 if torch.cuda.is_available() and not args.cpu else 0
-        dataloader = DataLoader(dataset, batch_size=cfg["train"]["batch_size"], shuffle=True, drop_last=True, num_workers=num_workers, pin_memory=True)
-    else:
-        print("[DATASET] Using synthetic batching mode (Local dry-test or missing data folder).")
-        dataloader = None
 
-    epochs = args.epochs if args.epochs else (1 if args.cpu else cfg["train"]["epochs"])
-    print(f"[TRAIN] Starting Training Loop for {epochs} epoch(s)...")
-    model.train()
-    
-    start_time = time.time()
-    for epoch in range(1, epochs + 1):
-        total_loss_accum = 0.0
-        batch_count = 0
-        
-        if use_real_data and dataloader is not None and backbone is not None:
-            for imgs, _ in dataloader:
-                imgs = imgs.to(device)
-                with torch.no_grad():
-                    # Extract features from DINOv2
-                    features = backbone.forward_features(imgs)
-                    patch_tokens = features["x_norm_patchtokens"]  # [B, 1024, 768]
-                    cls_token = features["x_norm_clstoken"]        # [B, 768]
-                    
-                optimizer.zero_grad()
-                if args.use_gct:
-                    out_dict = model(patch_tokens, dinov2_cls_token=cls_token)
-                    loss = out_dict["total_loss"]
+# ─────────────────────────────────────────────────────────────────────────────
+# SCHEDULER (WarmCosineScheduler from paper)
+# ─────────────────────────────────────────────────────────────────────────────
+class WarmCosineScheduler:
+    """
+    Linear warmup + Cosine decay LR schedule (matches paper exactly).
+    Operates per-iteration (not per-epoch).
+    """
+    def __init__(self, optimizer, base_lr, final_lr, total_iters, warmup_iters=100):
+        self.optimizer = optimizer
+        warmup  = np.linspace(0., base_lr, warmup_iters)
+        iters   = np.arange(total_iters - warmup_iters)
+        cosine  = final_lr + 0.5 * (base_lr - final_lr) * (1 + np.cos(np.pi * iters / len(iters)))
+        self.schedule = np.concatenate([warmup, cosine])
+        self._step = 0
+
+    def step(self):
+        if self._step < len(self.schedule):
+            lr = float(self.schedule[self._step])
+            for pg in self.optimizer.param_groups:
+                pg['lr'] = lr
+        self._step += 1
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STABLEADAMW (from paper's optimizers/)
+# ─────────────────────────────────────────────────────────────────────────────
+class StableAdamW(torch.optim.Optimizer):
+    """
+    AdamW with gradient clipping via RMS norm (Stable AdamW variant).
+    Taken verbatim from Dinomaly/optimizers/StableAdamW.py.
+    """
+    def __init__(self, params, lr=2e-3, betas=(0.9, 0.999), eps=1e-8,
+                 weight_decay=1e-4, amsgrad=True, clip_threshold=1.0):
+        defaults = dict(lr=lr, betas=betas, eps=eps,
+                        weight_decay=weight_decay, amsgrad=amsgrad,
+                        clip_threshold=clip_threshold)
+        super().__init__(params, defaults)
+
+    def _rms(self, tensor):
+        return tensor.norm(2) / (tensor.numel() ** 0.5)
+
+    @torch.no_grad()
+    def step(self, closure=None):
+        loss = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
+
+        for group in self.param_groups:
+            for p in group['params']:
+                if p.grad is None:
+                    continue
+                p.data.mul_(1 - group['lr'] * group['weight_decay'])
+
+                grad    = p.grad
+                amsgrad = group['amsgrad']
+                state   = self.state[p]
+
+                if len(state) == 0:
+                    state['step'] = 0
+                    state['exp_avg']    = torch.zeros_like(p)
+                    state['exp_avg_sq'] = torch.zeros_like(p)
+                    if amsgrad:
+                        state['max_exp_avg_sq'] = torch.zeros_like(p)
+
+                exp_avg, exp_avg_sq = state['exp_avg'], state['exp_avg_sq']
+                beta1, beta2 = group['betas']
+                state['step'] += 1
+                bc1 = 1 - beta1 ** state['step']
+                bc2 = 1 - beta2 ** state['step']
+
+                exp_avg.mul_(beta1).add_(grad, alpha=1 - beta1)
+                exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
+
+                if amsgrad:
+                    max_sq = state['max_exp_avg_sq']
+                    torch.max(max_sq, exp_avg_sq, out=max_sq)
+                    denom = (max_sq.sqrt() / math.sqrt(bc2)).add_(group['eps'])
                 else:
-                    rec_patches = model(patch_tokens)
-                    loss = nn.functional.mse_loss(rec_patches, patch_tokens)
-                    
-                loss.backward()
-                optimizer.step()
-                total_loss_accum += loss.item()
-                batch_count += 1
-            avg_loss = total_loss_accum / max(batch_count, 1)
+                    denom = (exp_avg_sq.sqrt() / math.sqrt(bc2)).add_(group['eps'])
+
+                lr_scale = grad / denom
+                lr_scale = max(1.0, self._rms(lr_scale) / group['clip_threshold'])
+                step_size = group['lr'] / bc1 / lr_scale
+                p.data.addcdiv_(exp_avg, denom, value=-step_size)
+
+        return loss
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TRAINING FUNCTION
+# ─────────────────────────────────────────────────────────────────────────────
+def train(args):
+    cfg    = load_config(args.config)
+    device = torch.device("cpu" if args.cpu or not torch.cuda.is_available()
+                          else cfg["project"]["device"])
+    set_deterministic(SEED)
+
+    use_gct    = args.use_gct
+    model_name = "DINOMALY + GCT (Paper-Strict)" if use_gct else "DINOMALY BASELINE (Paper-Strict)"
+    category   = args.category
+
+    print(f"[INFO] GPU : {torch.cuda.get_device_name(0) if device.type == 'cuda' else 'CPU'}")
+    print(f"[INFO] Model: {model_name}  |  Category: {category}")
+    print(f"[SEED] {SEED}")
+
+    # ── Hyper-parameters (paper defaults) ─────────────────────────────────
+    TOTAL_ITERS  = cfg.get("train", {}).get("total_iters", 5000)
+    BATCH_SIZE   = cfg.get("train", {}).get("batch_size", 16)
+    IMG_SIZE     = cfg.get("dataset", {}).get("img_size", 448)
+    CROP_SIZE    = cfg.get("dataset", {}).get("crop_size", 392)
+    BASE_LR      = cfg.get("train", {}).get("learning_rate", 2e-3)
+    FINAL_LR     = cfg.get("train", {}).get("final_lr", 2e-4)
+    WARMUP_ITERS = cfg.get("train", {}).get("warmup_iters", 100)
+    WEIGHT_DECAY = cfg.get("train", {}).get("weight_decay", 1e-4)
+    GCT_LAMBDA   = cfg.get("train", {}).get("gct_lambda", 0.1)
+    HM_P         = cfg.get("train", {}).get("hm_p", 0.9)
+    HM_FACTOR    = cfg.get("train", {}).get("hm_factor", 0.1)
+    SAVE_DIR     = ROOT / cfg["train"]["save_dir"]
+    TARGET_LAYERS = cfg.get("model", {}).get("target_layers", [2, 3, 4, 5, 6, 7, 8, 9])
+
+    # ── Dataset ────────────────────────────────────────────────────────────
+    data_root = ROOT / cfg["dataset"]["data_path"] / category
+    dataset   = MVTecLocoTrainDataset(data_root, img_size=IMG_SIZE, crop_size=CROP_SIZE)
+    loader    = DataLoader(
+        dataset,
+        batch_size=BATCH_SIZE,
+        shuffle=True,
+        num_workers=4,
+        pin_memory=True,
+        drop_last=True,
+    )
+    print(f"[DATASET] Loaded {len(dataset)} training images from: {data_root / 'train/good'}")
+
+    # ── Load DINOv2-Register Backbone (frozen) ─────────────────────────────
+    backbone = load_dinov2_register(device)
+
+    # ── Build Model ────────────────────────────────────────────────────────
+    embed_dim     = cfg["model"]["embed_dim"]       # 768
+    num_decoder   = cfg["model"]["decoder_layers"]  # 8
+
+    if use_gct:
+        model = ViTillGCT(
+            embed_dim=embed_dim,
+            num_decoder_layers=num_decoder,
+            target_layers=TARGET_LAYERS,
+            gct_lambda=GCT_LAMBDA,
+        ).to(device)
+        trainable_params = list(model.bottleneck.parameters()) + \
+                           list(model.decoder.parameters())    + \
+                           list(model.gct.parameters())
+    else:
+        model = ViTillBaseline(
+            embed_dim=embed_dim,
+            num_decoder_layers=num_decoder,
+            target_layers=TARGET_LAYERS,
+        ).to(device)
+        trainable_params = list(model.bottleneck.parameters()) + \
+                           list(model.decoder.parameters())
+
+    # ── Optimizer & Scheduler ─────────────────────────────────────────────
+    optimizer  = StableAdamW(
+        [{'params': trainable_params}],
+        lr=BASE_LR, betas=(0.9, 0.999),
+        weight_decay=WEIGHT_DECAY, amsgrad=True, eps=1e-8
+    )
+    scheduler  = WarmCosineScheduler(optimizer, BASE_LR, FINAL_LR, TOTAL_ITERS, WARMUP_ITERS)
+
+    # ── Training Loop (iteration-based, not epoch-based) ──────────────────
+    model.train()
+    data_iter  = iter(loader)
+    start_time = time.time()
+    loss_accum = []
+
+    print(f"[TRAIN] Starting training loop for {TOTAL_ITERS} iterations...")
+
+    for it in range(TOTAL_ITERS):
+        # Infinite data iterator
+        try:
+            imgs = next(data_iter)
+        except StopIteration:
+            data_iter = iter(loader)
+            imgs = next(data_iter)
+
+        imgs = imgs.to(device, non_blocking=True)
+
+        # Extract features from frozen DINOv2-Register backbone
+        with torch.no_grad():
+            feat_list, cls_token = extract_intermediate_features(
+                backbone, imgs, TARGET_LAYERS, return_cls=True
+            )
+
+        # Forward through Bottleneck + GCT + Decoder
+        optimizer.zero_grad()
+
+        if use_gct:
+            en, de, gct_loss = model(feat_list, cls_token)
+            loss = combined_loss(en, de, gct_loss, p=HM_P, factor=HM_FACTOR, gct_lambda=GCT_LAMBDA)
         else:
-            # Synthetic dry-run batch
-            dummy_patch_tokens = torch.randn(cfg["train"]["batch_size"], 1024, cfg["model"]["embed_dim"]).to(device)
-            dummy_cls = torch.randn(cfg["train"]["batch_size"], cfg["model"]["embed_dim"]).to(device)
-            
-            optimizer.zero_grad()
-            if args.use_gct:
-                out_dict = model(dummy_patch_tokens, dinov2_cls_token=dummy_cls)
-                loss = out_dict["total_loss"]
-            else:
-                output = model(dummy_patch_tokens)
-                loss = nn.functional.mse_loss(output, dummy_patch_tokens)
-                
-            loss.backward()
-            optimizer.step()
-            avg_loss = loss.item()
-            
-        if epoch == 1 or epoch % 5 == 0 or epoch == epochs:
+            en, de = model(feat_list)
+            loss = global_cosine_hm_percent(en, de, p=HM_P, factor=HM_FACTOR)
+
+        loss.backward()
+        nn.utils.clip_grad_norm_(trainable_params, max_norm=0.1)
+        optimizer.step()
+        scheduler.step()
+
+        loss_accum.append(loss.item())
+
+        # Logging every 100 iters
+        if (it + 1) % 100 == 0:
             elapsed = time.time() - start_time
-            sec_per_epoch = elapsed / epoch
-            print(f"  [Epoch {epoch:03d}/{epochs:03d}] Avg Loss: {avg_loss:.6f} | Speed: {sec_per_epoch:.2f}s/epoch")
-            
+            avg_loss = np.mean(loss_accum)
+            speed = elapsed / (it + 1)
+            remaining = speed * (TOTAL_ITERS - it - 1)
+            print(f"  [Iter {it+1:05d}/{TOTAL_ITERS}] "
+                  f"Loss: {avg_loss:.6f}  "
+                  f"LR: {optimizer.param_groups[0]['lr']:.2e}  "
+                  f"Elapsed: {elapsed:.0f}s  "
+                  f"ETA: {remaining:.0f}s")
+            loss_accum = []
+
     total_time = time.time() - start_time
-    print(f"[SUCCESS] Training completed in {total_time:.2f} seconds.")
-    
-    # Save checkpoint
-    save_dir = ROOT / cfg["train"]["save_dir"]
-    save_dir.mkdir(parents=True, exist_ok=True)
-    model_prefix = "gct" if args.use_gct else "baseline"
-    ckpt_path = save_dir / f"{model_prefix}_{args.category}_best.pth"
-    torch.save(model.state_dict(), ckpt_path)
+    print(f"[SUCCESS] Training completed in {total_time:.1f} seconds.")
+
+    # ── Save Checkpoint ────────────────────────────────────────────────────
+    prefix    = "gct" if use_gct else "baseline"
+    subfolder = "gct" if use_gct else "baseline"
+    save_path = SAVE_DIR / subfolder
+    save_path.mkdir(parents=True, exist_ok=True)
+    ckpt_path = save_path / f"{prefix}_{category}_strict.pth"
+
+    # Only save trainable parameters (backbone is frozen, not included)
+    save_dict = {
+        "model_state": model.state_dict(),
+        "category":    category,
+        "model_type":  "gct" if use_gct else "baseline",
+        "total_iters": TOTAL_ITERS,
+    }
+    torch.save(save_dict, ckpt_path)
     print(f"[SAVED] Checkpoint saved to: {ckpt_path.relative_to(ROOT)}")
 
+
+# ─────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Train Dinomaly Baseline / GCT on MVTec LOCO AD")
-    parser.add_argument("--config", type=str, default="src/configs/baseline_loco.json", help="Path to config file")
-    parser.add_argument("--category", type=str, default="breakfast_box", help="Category to train")
-    parser.add_argument("--epochs", type=int, default=None, help="Override epoch count")
-    parser.add_argument("--use_gct", action="store_true", help="Enable Global Consistency Token (GCT)")
-    parser.add_argument("--cpu", action="store_true", help="Force CPU execution for local testing")
-    
+    parser = argparse.ArgumentParser(description="Train ViTill-GCT on MVTec LOCO AD (Paper-Strict)")
+    parser.add_argument("--config",   type=str, default="src/configs/loco_strict.json")
+    parser.add_argument("--category", type=str, default="breakfast_box")
+    parser.add_argument("--use_gct",  action="store_true", help="Train GCT model (default: Baseline)")
+    parser.add_argument("--cpu",      action="store_true")
     args = parser.parse_args()
     train(args)
-# Model checkpoints are saved dynamically based on the target category
-# Pinned memory drastically reduces CPU-GPU transfer bottlenecks
-  
-  
