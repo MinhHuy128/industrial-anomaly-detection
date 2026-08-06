@@ -24,7 +24,7 @@
     "final_lr": 0.0002,
     "warmup_iters": 100,
     "weight_decay": 0.0001,
-    "gct_lambda": 0.1,
+    "gct_lambda": 0.5,
     "hm_p": 0.9,
     "hm_factor": 0.1,
     "save_dir": "experiments"
@@ -40,7 +40,8 @@
   },
   "eval": {
     "metrics": ["auroc_logical", "auroc_structural", "auroc_mean", "spro_pixel"],
-    "anomaly_score": "cosine_distance",
+    "anomaly_score": "cosine_distance_dual_stream",
+    "gct_gamma": 1.0,
     "top_ratio": 0.01,
     "gaussian_sigma": 4
   }
