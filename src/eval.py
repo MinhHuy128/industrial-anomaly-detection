@@ -6,9 +6,10 @@ Anomaly scoring faithful to Dinomaly paper:
   - Average over feature groups → anomaly map [H, W]
   - Upsample to input resolution (448×448)
   - Gaussian smoothing (σ=4)
-  - Image-level score = max patch score (top 1% percentile for speed)
+  - Image-level score = mean of top 1% pixels (top-k percentile pooling)
+  - GCT V2 Active Dual-Stream: Score_final = Score_patch + gamma * Score_gct
   - Separate AUROC for Logical / Structural anomalies (MVTec LOCO AD format)
-  - Pixel-level sPRO via GT mask overlap
+  - Pixel-level sPRO (approximate) via GT mask overlap at FPR [0, 0.30]
   - Full pipeline latency (DINOv2-Register + Bottleneck + Decoder)
 """
 import sys
@@ -51,69 +52,96 @@ def compute_auroc(labels, scores):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ANOMALY MAP (paper formula: cosine distance)
+# ANOMALY MAP (paper formula: cosine distance + exact spatial alignment)
 # ─────────────────────────────────────────────────────────────────────────────
-def compute_anomaly_map(en_list, de_list, out_size: int = 448) -> np.ndarray:
+def compute_anomaly_map(en_list, de_list, crop_size: int = 392, out_size: int = 448) -> np.ndarray:
     """
-    Per-patch cosine distance, averaged over feature groups, upsampled to out_size.
+    Per-patch cosine distance, averaged over feature groups, with exact spatial coordinate restoration.
     Paper Eq.4: a(i) = 1 - cos_sim(f_enc(i), f_dec(i))
+
+    Spatial Alignment Rationale:
+      - Model accepts CenterCrop(crop_size=392) from original Resize(out_size=448).
+      - Upsample patch anomaly map to crop_size (392x392).
+      - Paste back into the center of an out_size (448x448) canvas at top/left offset = (448-392)//2 = 28.
+      - Ensures 100% spatial coordinate alignment with GT masks for pixel-level sPRO.
     """
     anomaly_map = torch.zeros(1, 1, 1, 1, device=en_list[0].device)
     for en, de in zip(en_list, de_list):
         # en, de: [B, C, H, W] — compute cosine distance per spatial position
         a_map = 1.0 - F.cosine_similarity(en, de, dim=1, eps=1e-8)  # [B, H, W]
         a_map = a_map.unsqueeze(1)                                    # [B, 1, H, W]
-        a_map = F.interpolate(a_map, size=(out_size, out_size),
+        # Upsample to crop region (392x392)
+        a_map = F.interpolate(a_map, size=(crop_size, crop_size),
                                mode='bilinear', align_corners=False)
         anomaly_map = anomaly_map + a_map
 
     anomaly_map = anomaly_map / len(en_list)  # average over groups
-    anomaly_map = anomaly_map.squeeze().cpu().numpy()  # [H, W]
+    crop_amap   = anomaly_map.squeeze().cpu().numpy()  # [392, 392]
 
-    # Gaussian smooth (σ=4, same as typical anomaly detection practice)
-    anomaly_map = gaussian_filter(anomaly_map, sigma=4)
-    return anomaly_map
+    # Paste into out_size canvas (448x448) to restore exact original image coordinates
+    if crop_size < out_size:
+        canvas = np.zeros((out_size, out_size), dtype=crop_amap.dtype)
+        top  = (out_size - crop_size) // 2
+        left = (out_size - crop_size) // 2
+        canvas[top:top + crop_size, left:left + crop_size] = crop_amap
+    else:
+        canvas = crop_amap
+
+    # Gaussian smooth (σ=4)
+    smooth_amap = gaussian_filter(canvas, sigma=4)
+    return smooth_amap
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# IMAGE-LEVEL SCORE (max or top-1% mean)
+# IMAGE-LEVEL SCORE (mean of top-k% pixels)
 # ─────────────────────────────────────────────────────────────────────────────
 def image_score(anomaly_map: np.ndarray, max_ratio: float = 0.01) -> float:
-    """Top max_ratio fraction average (paper uses max = top 1%)."""
+    """Mean of the top max_ratio fraction of pixels (top-1% percentile pooling)."""
     flat = anomaly_map.flatten()
     k    = max(1, int(len(flat) * max_ratio))
     return float(np.sort(flat)[-k:].mean())
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# INFERENCE ON ONE IMAGE
+# INFERENCE ON ONE IMAGE (GCT V2 Active Dual-Stream Scoring)
 # ─────────────────────────────────────────────────────────────────────────────
 @torch.no_grad()
 def infer_one(backbone, model, img_path: Path, transform, device, use_gct: bool,
-              target_layers: list, out_size: int) -> tuple:
-    """Returns (image_anomaly_score, anomaly_map_np)."""
+              target_layers: list, out_size: int, crop_size: int = 392, gamma: float = 1.0) -> tuple:
+    """
+    Returns (image_anomaly_score, anomaly_map_np).
+
+    GCT V2 Dual-Stream Formula:
+      Score_final = Score_patch (top-1% mean patch error) + gamma * Score_gct (global CLS distance)
+    """
     img   = Image.open(img_path).convert("RGB")
     img_t = transform(img).unsqueeze(0).to(device)
 
     feat_list, cls_token = extract_intermediate_features(backbone, img_t, target_layers)
 
     if use_gct:
-        en, de, _ = model(feat_list, cls_token)
+        en, de, gct_loss = model(feat_list, cls_token)
+        score_gct = float(gct_loss.item())
     else:
         en, de = model(feat_list)
+        score_gct = 0.0
 
-    amap  = compute_anomaly_map(en, de, out_size=out_size)
-    score = image_score(amap)
-    return score, amap
+    amap  = compute_anomaly_map(en, de, crop_size=crop_size, out_size=out_size)
+    score_patch = image_score(amap)
+
+    # 🎯 GCT V2: Combine local patch reconstruction error with global GCT alignment error
+    score_final = score_patch + (gamma * score_gct if use_gct else 0.0)
+    return score_final, amap
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SPRO PIXEL-LEVEL
 # ─────────────────────────────────────────────────────────────────────────────
 def compute_spro(backbone, model, test_path: Path, transform, device,
-                 use_gct: bool, target_layers: list, img_size: int) -> float:
+                 use_gct: bool, target_layers: list, img_size: int, crop_size: int = 392, gamma: float = 1.0) -> float:
     """
     Approximate sPRO: pixel-level overlap between predicted anomaly map and GT masks.
+    Uses exact spatial coordinate restoration (crop_size=392 canvas centered on img_size=448).
     MVTec LOCO AD GT layout: ground_truth/<anom_type>/<stem>/<stem>.png
     """
     gt_root     = test_path.parent / "ground_truth"
@@ -136,7 +164,7 @@ def compute_spro(backbone, model, test_path: Path, transform, device,
             gt_mask = np.array(Image.open(mask_path).convert("L").resize(
                 (img_size, img_size))) > 0
 
-            _, amap = infer_one(backbone, model, p, transform, device, use_gct, target_layers, img_size)
+            _, amap = infer_one(backbone, model, p, transform, device, use_gct, target_layers, img_size, crop_size=crop_size, gamma=gamma)
             all_gt.append(gt_mask.flatten())
             all_pred.append(amap.flatten())
 
@@ -173,17 +201,19 @@ def evaluate(args):
 
     device         = torch.device("cpu" if args.cpu or not torch.cuda.is_available()
                                   else cfg["project"]["device"])
-    use_gct        = args.use_gct
     category       = args.category
-    img_size       = cfg["dataset"]["img_size"]  # 448
+    use_gct        = args.use_gct
+    img_size       = cfg["dataset"]["img_size"]   # 448
+    crop_size      = cfg["dataset"].get("crop_size", 392)  # 392
+    embed_dim      = cfg["model"]["embed_dim"]
+    num_decoder    = cfg["model"]["decoder_layers"]
     target_layers  = cfg["model"].get("target_layers", [2, 3, 4, 5, 6, 7, 8, 9])
-    model_name     = "DINOMALY + GCT (Paper-Strict)" if use_gct else "DINOMALY BASELINE (Paper-Strict)"
+    gamma          = args.gamma if args.gamma is not None else (cfg["eval"].get("gct_gamma", 1.0) if use_gct else 0.0)
+    model_name     = "DINOMALY + GCT V2 (Active Dual-Stream)" if use_gct else "DINOMALY BASELINE (Paper-Strict)"
 
-    print(f"[EVAL] Model: {model_name}  |  Category: {category}  |  Device: {device}")
+    print(f"[EVAL] Model: {model_name}  |  Category: {category}  |  Device: {device}  |  Gamma: {gamma if use_gct else 0.0}")
 
     # ── Build Model ─────────────────────────────────────────────────────────
-    embed_dim    = cfg["model"]["embed_dim"]
-    num_decoder  = cfg["model"]["decoder_layers"]
 
     if use_gct:
         model = ViTillGCT(embed_dim=embed_dim, num_decoder_layers=num_decoder,
@@ -192,17 +222,28 @@ def evaluate(args):
         model = ViTillBaseline(embed_dim=embed_dim, num_decoder_layers=num_decoder,
                                target_layers=target_layers).to(device)
 
+
     # ── Load Checkpoint ─────────────────────────────────────────────────────
     prefix    = "gct" if use_gct else "baseline"
     subfolder = "gct" if use_gct else "baseline"
-    ckpt_path = ROOT / cfg["train"]["save_dir"] / subfolder / f"{prefix}_{category}_strict.pth"
+    ckpt_dir  = ROOT / cfg["train"]["save_dir"] / subfolder
 
+    # Priority: *_strict.pth (current branch) → *_best.pth (older branch fallback)
+    ckpt_path = ckpt_dir / f"{prefix}_{category}_strict.pth"
     if not ckpt_path.exists():
-        raise FileNotFoundError(
-            f"[ERROR] Checkpoint not found: {ckpt_path}\n"
-            f"        Run: python src/train.py --category {category}"
-            + (" --use_gct" if use_gct else "")
-        )
+        fallback = ckpt_dir / f"{prefix}_{category}_best.pth"
+        if fallback.exists():
+            print(f"[WARN] '{prefix}_{category}_strict.pth' not found. "
+                  f"Falling back to: {fallback.name}")
+            ckpt_path = fallback
+        else:
+            raise FileNotFoundError(
+                f"[ERROR] No checkpoint found for '{category}' in: {ckpt_dir}\n"
+                f"        Tried: {prefix}_{category}_strict.pth\n"
+                f"               {prefix}_{category}_best.pth\n"
+                f"        Run: python src/train.py --category {category}"
+                + (" --use_gct" if use_gct else "")
+            )
 
     ckpt = torch.load(ckpt_path, map_location=device)
     model.load_state_dict(ckpt["model_state"])
@@ -232,14 +273,14 @@ def evaluate(args):
 
     # Warmup (10 runs to initialize CUDA kernels)
     for _ in range(10):
-        infer_one(backbone, model, sample_imgs[0], transform, device, use_gct, target_layers, img_size)
+        infer_one(backbone, model, sample_imgs[0], transform, device, use_gct, target_layers, img_size, gamma=gamma)
 
     # Benchmark 50 runs
     if device.type == "cuda":
         torch.cuda.synchronize()
     t0 = time.time()
     for _ in range(50):
-        infer_one(backbone, model, sample_imgs[0], transform, device, use_gct, target_layers, img_size)
+        infer_one(backbone, model, sample_imgs[0], transform, device, use_gct, target_layers, img_size, gamma=gamma)
     if device.type == "cuda":
         torch.cuda.synchronize()
     latency_ms = (time.time() - t0) / 50 * 1000.0
@@ -251,7 +292,7 @@ def evaluate(args):
     # ── Collect Scores ────────────────────────────────────────────────────────
     good_s, good_l = [], []
     for p in sorted(list(good_dir.glob("*.png")) + list(good_dir.glob("*.jpg"))):
-        s, _ = infer_one(backbone, model, p, transform, device, use_gct, target_layers, img_size)
+        s, _ = infer_one(backbone, model, p, transform, device, use_gct, target_layers, img_size, gamma=gamma)
         good_s.append(s); good_l.append(0)
 
     log_dir    = test_path / "logical_anomalies"
@@ -259,11 +300,11 @@ def evaluate(args):
     log_s, log_l, struct_s, struct_l = [], [], [], []
 
     for p in sorted(list(log_dir.glob("*.png")) + list(log_dir.glob("*.jpg"))):
-        s, _ = infer_one(backbone, model, p, transform, device, use_gct, target_layers, img_size)
+        s, _ = infer_one(backbone, model, p, transform, device, use_gct, target_layers, img_size, gamma=gamma)
         log_s.append(s); log_l.append(1)
 
     for p in sorted(list(struct_dir.glob("*.png")) + list(struct_dir.glob("*.jpg"))):
-        s, _ = infer_one(backbone, model, p, transform, device, use_gct, target_layers, img_size)
+        s, _ = infer_one(backbone, model, p, transform, device, use_gct, target_layers, img_size, gamma=gamma)
         struct_s.append(s); struct_l.append(1)
 
     if not good_s:
@@ -279,8 +320,8 @@ def evaluate(args):
 
     # ── sPRO ─────────────────────────────────────────────────────────────────
     spro = compute_spro(backbone, model, test_path, transform, device,
-                        use_gct, target_layers, img_size)
-    spro_label = f"{spro:.2f} %" if spro >= 0 else "N/A (GT masks not found)"
+                        use_gct, target_layers, img_size, crop_size=crop_size, gamma=gamma)
+    spro_label = f"{spro:.2f} % (approx.)" if spro >= 0 else "N/A (GT masks not found)"
 
     # ── Print Results ─────────────────────────────────────────────────────────
     print("=" * 70)
@@ -289,9 +330,9 @@ def evaluate(args):
     print(f"  • Logical Anomaly AUROC   : {auroc_logical:.2f} %")
     print(f"  • Structural Anomaly AUROC: {auroc_structural:.2f} %")
     print(f"  • Mean AUROC Score        : {auroc_mean:.2f} %")
-    print(f"  • sPRO (pixel-level)      : {spro_label}")
-    print(f"  • Full Pipeline Latency   : {latency_ms:.2f} ms / image (FPS: {1000/latency_ms:.1f})")
-    print(f"    (DINOv2-Register ViT-B/14 + Bottleneck + Decoder)")
+    print(f"  • sPRO* (pixel-level)     : {spro_label}")
+    print(f"  • Inference Latency       : {latency_ms:.2f} ms / image (FPS: {1000/latency_ms:.1f})")
+    print(f"    (Single-image repeated inference: DINOv2-Register ViT-B/14 + Bottleneck + Decoder)")
     print(f"  • Status                  : SUCCESSFUL - Evaluated")
     print("=" * 70)
 
@@ -302,6 +343,7 @@ if __name__ == "__main__":
     parser.add_argument("--config",   type=str, default="src/configs/loco_strict.json")
     parser.add_argument("--category", type=str, default="breakfast_box")
     parser.add_argument("--use_gct",  action="store_true")
+    parser.add_argument("--gamma",    type=float, default=None, help="GCT Score weight (default: from config eval.gct_gamma = 1.0)")
     parser.add_argument("--cpu",      action="store_true")
     args = parser.parse_args()
     evaluate(args)
