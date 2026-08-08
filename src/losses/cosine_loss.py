@@ -54,6 +54,7 @@ def global_cosine_hm_percent(
     """
     cos_loss = nn.CosineSimilarity(dim=1)
     loss = torch.tensor(0., device=en_list[0].device)
+    hook_handles = []  # Track handles to remove hooks after backward
 
     for en, de in zip(en_list, de_list):
         # Detach encoder — no gradient flows back to DINOv2 (frozen backbone)
@@ -74,11 +75,22 @@ def global_cosine_hm_percent(
         de_flat = de_.reshape(de_.shape[0], de_.shape[1], -1)   # [B, C, N]
         loss = loss + torch.mean(1 - cos_loss(en_flat, de_flat))
 
-        # Register gradient hook: suppress gradients for easy patches
-        hook_fn = partial(modify_grad, inds=(point_dist < thresh), factor=factor)
-        de_.register_hook(hook_fn)
+        # Register gradient hook: suppress gradients for easy patches.
+        # Store handle so we can remove it after backward (prevents hook accumulation / memory leak).
+        easy_mask = (point_dist < thresh)  # captured in closure
+        hook_fn = partial(modify_grad, inds=easy_mask, factor=factor)
+        handle = de_.register_hook(hook_fn)
+        hook_handles.append(handle)
 
-    return loss / len(en_list)
+    loss = loss / len(en_list)
+
+    # Auto-remove all hooks after backward to prevent memory leak across iterations.
+    def _cleanup_hooks(grad):
+        for h in hook_handles:
+            h.remove()
+    loss.register_hook(_cleanup_hooks)
+
+    return loss
 
 
 def gct_cosine_loss(proj_gct: torch.Tensor, cls_token: torch.Tensor) -> torch.Tensor:
