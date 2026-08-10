@@ -28,7 +28,12 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
-from PIL import Image
+from PIL import Image, ImageDraw
+
+try:
+    from torch.utils.tensorboard import SummaryWriter
+except Exception:
+    SummaryWriter = None
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.append(str(ROOT))
@@ -104,6 +109,70 @@ def load_config(config_path: str) -> dict:
             return yaml.safe_load(f)
     except ImportError:
         raise RuntimeError("PyYAML not installed. Use .json config.")
+
+
+def save_loss_curve(save_path: Path, iter_history, loss_history, gct_history=None):
+    if not iter_history or not loss_history:
+        print("[WARN] No training history available; skipping loss curve export.")
+        return
+
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    width, height = 1400, 800
+    margin_left, margin_right = 90, 30
+    margin_top, margin_bottom = 70, 80
+    plot_w = width - margin_left - margin_right
+    plot_h = height - margin_top - margin_bottom
+
+    image = Image.new("RGB", (width, height), "white")
+    draw = ImageDraw.Draw(image)
+
+    values = list(loss_history)
+    if gct_history is not None and any(value != 0.0 for value in gct_history):
+        values.extend(gct_history)
+
+    min_loss = min(values)
+    max_loss = max(values)
+    if max_loss <= min_loss:
+        max_loss = min_loss + 1.0
+
+    def x_pos(index: int) -> float:
+        if len(iter_history) == 1:
+            return margin_left + plot_w / 2.0
+        return margin_left + (index / (len(iter_history) - 1)) * plot_w
+
+    def y_pos(value: float) -> float:
+        return margin_top + (max_loss - value) / (max_loss - min_loss) * plot_h
+
+    # Axes and grid
+    draw.line((margin_left, margin_top, margin_left, margin_top + plot_h), fill="black", width=2)
+    draw.line((margin_left, margin_top + plot_h, margin_left + plot_w, margin_top + plot_h), fill="black", width=2)
+
+    for frac in [0.25, 0.5, 0.75]:
+        y = margin_top + plot_h * frac
+        draw.line((margin_left, y, margin_left + plot_w, y), fill=(220, 220, 220), width=1)
+
+    def draw_polyline(series, color):
+        if series is None:
+            return
+        points = [(x_pos(i), y_pos(float(value))) for i, value in enumerate(series)]
+        if len(points) >= 2:
+            draw.line(points, fill=color, width=4)
+        for x, y in points[::max(1, len(points) // 50)]:
+            draw.ellipse((x - 2, y - 2, x + 2, y + 2), fill=color)
+
+    draw_polyline(loss_history, (31, 119, 180))
+    if gct_history is not None and any(value != 0.0 for value in gct_history):
+        draw_polyline(gct_history, (214, 39, 40))
+
+    title = "Training Loss Curve"
+    draw.text((margin_left, 20), title, fill="black")
+    draw.text((margin_left, height - 45), "Iteration", fill="black")
+    draw.text((15, margin_top), "Loss", fill="black")
+    draw.text((margin_left + 20, 40), "Blue: Total Loss", fill=(31, 119, 180))
+    if gct_history is not None and any(value != 0.0 for value in gct_history):
+        draw.text((margin_left + 220, 40), "Red: GCT Loss", fill=(214, 39, 40))
+
+    image.save(save_path)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -203,7 +272,8 @@ def train(args):
     cfg    = load_config(args.config)
     device = torch.device("cpu" if args.cpu or not torch.cuda.is_available()
                           else cfg["project"]["device"])
-    set_deterministic(SEED)
+    seed   = args.seed if args.seed is not None else cfg["project"].get("seed", 42)
+    set_deterministic(seed)
 
     use_gct    = args.use_gct
     model_name = "DINOMALY + GCT (Paper-Strict)" if use_gct else "DINOMALY BASELINE (Paper-Strict)"
@@ -211,7 +281,7 @@ def train(args):
 
     print(f"[INFO] GPU : {torch.cuda.get_device_name(0) if device.type == 'cuda' else 'CPU'}")
     print(f"[INFO] Model: {model_name}  |  Category: {category}")
-    print(f"[SEED] {SEED}")
+    print(f"[SEED] {seed}")
 
     # ── Hyper-parameters (paper defaults) ─────────────────────────────────
     TOTAL_ITERS  = cfg.get("train", {}).get("total_iters", 5000)
@@ -227,6 +297,7 @@ def train(args):
     HM_FACTOR    = cfg.get("train", {}).get("hm_factor", 0.1)
     SAVE_DIR     = ROOT / cfg["train"]["save_dir"]
     TARGET_LAYERS = cfg.get("model", {}).get("target_layers", [2, 3, 4, 5, 6, 7, 8, 9])
+    timestamp = time.strftime("%Y%m%d-%H%M%S")
 
     # ── Dataset ────────────────────────────────────────────────────────────
     data_root = ROOT / cfg["dataset"]["data_path"] / category
@@ -275,13 +346,38 @@ def train(args):
     )
     scheduler  = WarmCosineScheduler(optimizer, BASE_LR, FINAL_LR, TOTAL_ITERS, WARMUP_ITERS)
 
+    # ── Artifacts / Logging ────────────────────────────────────────────────
+    save_path = SAVE_DIR / ("gct" if use_gct else "baseline")
+    save_path.mkdir(parents=True, exist_ok=True)
+    log_path = save_path / "train.log"
+    tb_writer = None
+    if SummaryWriter is not None:
+        tb_dir = save_path / "tensorboard" / f"{category}_{timestamp}"
+        tb_writer = SummaryWriter(log_dir=str(tb_dir))
+        print(f"[TENSORBOARD] Writing events to: {tb_dir.relative_to(ROOT)}")
+    else:
+        print("[WARN] torch.utils.tensorboard unavailable; continuing without TensorBoard.")
+
+    def log_message(message: str):
+        print(message)
+        with open(log_path, "a", encoding="utf-8") as log_file:
+            log_file.write(message + "\n")
+
+    iter_history = []
+    loss_history = []
+    gct_history = []
+    lr_history = []
+
+    log_message(f"[RUN] {timestamp} | model={model_name} | category={category} | config={args.config}")
+    log_message(f"[RUN] train.log => {log_path.relative_to(ROOT)}")
+
     # ── Training Loop (iteration-based, not epoch-based) ──────────────────
     model.train()
     data_iter  = iter(loader)
     start_time = time.time()
     loss_accum = []
 
-    print(f"[TRAIN] Starting training loop for {TOTAL_ITERS} iterations...")
+    log_message(f"[TRAIN] Starting training loop for {TOTAL_ITERS} iterations...")
 
     for it in range(TOTAL_ITERS):
         # Infinite data iterator
@@ -307,40 +403,78 @@ def train(args):
             # Progressive p warmup: paper uses p = min(0.9 * it/1000, 0.9)
             p_curr = min(HM_P * it / 1000.0, HM_P)
             loss = combined_loss(en, de, gct_loss, p=p_curr, factor=HM_FACTOR, gct_lambda=GCT_LAMBDA)
+            gct_loss_value = float(gct_loss.item())
         else:
             en, de = model(feat_list)
             # Progressive p warmup (same curriculum as paper)
             p_curr = min(HM_P * it / 1000.0, HM_P)
             loss = global_cosine_hm_percent(en, de, p=p_curr, factor=HM_FACTOR)
+            gct_loss_value = 0.0
 
         loss.backward()
         nn.utils.clip_grad_norm_(trainable_params, max_norm=0.1)
         optimizer.step()
         scheduler.step()
 
+        iter_idx = it + 1
+        loss_value = float(loss.item())
         loss_accum.append(loss.item())
+        iter_history.append(iter_idx)
+        loss_history.append(loss_value)
+        gct_history.append(gct_loss_value)
+        lr_history.append(float(optimizer.param_groups[0]["lr"]))
+
+        if tb_writer is not None:
+            tb_writer.add_scalar("train/loss", loss_value, iter_idx)
+            tb_writer.add_scalar("train/lr", optimizer.param_groups[0]["lr"], iter_idx)
+            tb_writer.add_scalar("train/p_curr", p_curr, iter_idx)
+            if use_gct:
+                tb_writer.add_scalar("train/gct_loss", gct_loss_value, iter_idx)
 
         # Logging every 100 iters
-        if (it + 1) % 100 == 0:
+        if iter_idx % 100 == 0:
             elapsed = time.time() - start_time
             avg_loss = np.mean(loss_accum)
-            speed = elapsed / (it + 1)
+            speed = elapsed / iter_idx
             remaining = speed * (TOTAL_ITERS - it - 1)
-            print(f"  [Iter {it+1:05d}/{TOTAL_ITERS}] "
-                  f"Loss: {avg_loss:.6f}  "
-                  f"LR: {optimizer.param_groups[0]['lr']:.2e}  "
-                  f"Elapsed: {elapsed:.0f}s  "
-                  f"ETA: {remaining:.0f}s")
+            log_message(f"  [Iter {iter_idx:05d}/{TOTAL_ITERS}] "
+                        f"Loss: {avg_loss:.6f}  "
+                        f"LR: {optimizer.param_groups[0]['lr']:.2e}  "
+                        f"Elapsed: {elapsed:.0f}s  "
+                        f"ETA: {remaining:.0f}s")
             loss_accum = []
 
     total_time = time.time() - start_time
-    print(f"[SUCCESS] Training completed in {total_time:.1f} seconds.")
+    log_message(f"[SUCCESS] Training completed in {total_time:.1f} seconds.")
+
+    curve_path = save_path / f"loss_curve_{category}_{timestamp}.png"
+    save_loss_curve(curve_path, iter_history, loss_history, gct_history)
+    log_message(f"[SAVED] Loss curve saved to: {curve_path.relative_to(ROOT)}")
+
+    manifest = {
+        "timestamp": timestamp,
+        "config": str(Path(args.config).as_posix()),
+        "category": category,
+        "model_name": model_name,
+        "use_gct": use_gct,
+        "seed": SEED,
+        "total_iters": TOTAL_ITERS,
+        "batch_size": BATCH_SIZE,
+        "img_size": IMG_SIZE,
+        "crop_size": CROP_SIZE,
+        "checkpoint": str((save_path / f"{'gct' if use_gct else 'baseline'}_{category}_strict.pth").relative_to(ROOT)),
+        "train_log": str(log_path.relative_to(ROOT)),
+        "loss_curve": str(curve_path.relative_to(ROOT)),
+        "tensorboard": str((save_path / "tensorboard" / f"{category}_{timestamp}").relative_to(ROOT)) if tb_writer is not None else None,
+    }
+    manifest_path = save_path / f"run_manifest_{category}_{timestamp}.json"
+    with open(manifest_path, "w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=2, ensure_ascii=False)
+    log_message(f"[SAVED] Run manifest saved to: {manifest_path.relative_to(ROOT)}")
 
     # ── Save Checkpoint ────────────────────────────────────────────────────
     prefix    = "gct" if use_gct else "baseline"
     subfolder = "gct" if use_gct else "baseline"
-    save_path = SAVE_DIR / subfolder
-    save_path.mkdir(parents=True, exist_ok=True)
     ckpt_path = save_path / f"{prefix}_{category}_strict.pth"
 
     # Only save trainable parameters (backbone is frozen, not included)
@@ -351,7 +485,10 @@ def train(args):
         "total_iters": TOTAL_ITERS,
     }
     torch.save(save_dict, ckpt_path)
-    print(f"[SAVED] Checkpoint saved to: {ckpt_path.relative_to(ROOT)}")
+    log_message(f"[SAVED] Checkpoint saved to: {ckpt_path.relative_to(ROOT)}")
+
+    if tb_writer is not None:
+        tb_writer.close()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -360,6 +497,7 @@ if __name__ == "__main__":
     parser.add_argument("--config",   type=str, default="src/configs/loco_strict.json")
     parser.add_argument("--category", type=str, default="breakfast_box")
     parser.add_argument("--use_gct",  action="store_true", help="Train GCT model (default: Baseline)")
+    parser.add_argument("--seed",     type=int, default=None, help="Random seed for reproducibility (default: 42)")
     parser.add_argument("--cpu",      action="store_true")
     args = parser.parse_args()
     train(args)
