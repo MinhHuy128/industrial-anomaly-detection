@@ -1,13 +1,46 @@
-# Exclusion rules
+# Python
 __pycache__/
+**/__pycache__/
 *.pyc
+*.pyo
+*.pyd
+
+# Environments
 .venv/
 venv/
 .env
+
+# IDE
 .vscode/
 .DS_Store
+
+# Dataset (large files — never commit)
+data/
 
 # Checkpoints & Experiments
 experiments/*.pth
 experiments/*.pt
-experiments/*.json
+experiments/baseline/
+experiments/gct/
+experiments/**/*.log
+
+# Eval logs
+eval_logs/
+
+# Generated figures
+docs/figures/
+
+# Tensorboard
+experiments/**/tensorboard/
+
+# Manifest & run logs
+experiments/**/*.json
+*.log
+
+# Temporary folders
+tmp/
+tmp_2/
+
+# Private self-study presentation guides & detailed reports (local only)
+docs/thuyet_trinh/
+docs/experimental_results.md
