@@ -27,20 +27,11 @@ experiments/**/*.log
 # Eval logs
 eval_logs/
 
-# Generated figures
-docs/figures/
-
-# Tensorboard
-experiments/**/tensorboard/
-
-# Manifest & run logs
-experiments/**/*.json
-*.log
-
-# Temporary folders
-tmp/
-tmp_2/
+# Generated figures (tracked for README visual results)
+# docs/figures/
 
 # Private self-study presentation guides & detailed reports (local only)
 docs/thuyet_trinh/
+docs/present/
 docs/experimental_results.md
+
