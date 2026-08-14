@@ -1,7 +1,6 @@
 """
-Decoder components extracted from Dinomaly original paper (Kang et al., 2024).
-Source: Dinomaly/models/vision_transformer.py (adapted for standalone use in src/)
-Includes: bMlp (Bottleneck MLP), LinearAttention2 (O(N) attention), Block (Decoder block)
+Decoder Blocks & Utility Layers for ViTill.
+Contains bMlp, LinearAttention2, DecoderBlock, and weight initialization.
 """
 import math
 from functools import partial
@@ -11,8 +10,11 @@ import torch.nn as nn
 from torch.nn.init import trunc_normal_
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# BOTTLENECK MLP
+# ─────────────────────────────────────────────────────────────────────────────
 class bMlp(nn.Module):
-    """Bottleneck MLP as used in Dinomaly paper (between Encoder and Decoder)."""
+    """Bottleneck MLP block placed between Encoder and Decoder."""
     def __init__(self, in_features, hidden_features=None, out_features=None,
                  act_layer=nn.GELU, drop=0.):
         super().__init__()
@@ -24,6 +26,7 @@ class bMlp(nn.Module):
         self.drop = nn.Dropout(drop)
 
     def forward(self, x):
+        # x: [B, N, C] -> [B, N, C]
         x = self.drop(x)
         x = self.fc1(x)
         x = self.act(x)
@@ -33,8 +36,11 @@ class bMlp(nn.Module):
         return x
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# STOCHASTIC DEPTH & STANDARD MLP
+# ─────────────────────────────────────────────────────────────────────────────
 class DropPath(nn.Module):
-    """Stochastic Depth (drop entire residual paths during training)."""
+    """Drop paths (Stochastic Depth) per sample."""
     def __init__(self, drop_prob=None):
         super().__init__()
         self.drop_prob = drop_prob
@@ -50,7 +56,7 @@ class DropPath(nn.Module):
 
 
 class Mlp(nn.Module):
-    """Standard MLP used inside Decoder ViT Blocks."""
+    """Standard MLP block inside Decoder blocks."""
     def __init__(self, in_features, hidden_features=None, out_features=None,
                  act_layer=nn.GELU, drop=0.):
         super().__init__()
@@ -62,6 +68,7 @@ class Mlp(nn.Module):
         self.drop = nn.Dropout(drop)
 
     def forward(self, x):
+        # x: [B, N, C] -> [B, N, C]
         x = self.fc1(x)
         x = self.act(x)
         x = self.drop(x)
@@ -70,11 +77,11 @@ class Mlp(nn.Module):
         return x
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# LINEAR ATTENTION (O(N) Complexity)
+# ─────────────────────────────────────────────────────────────────────────────
 class LinearAttention2(nn.Module):
-    """
-    O(N) Linear Attention used in Dinomaly Decoder (Eq.3 in paper).
-    Uses ELU+1 kernel trick for linear complexity in sequence length.
-    """
+    """O(N) Linear Attention mechanism using ELU+1 kernel decomposition."""
     def __init__(self, dim, num_heads=8, qkv_bias=False, qk_scale=None,
                  attn_drop=0., proj_drop=0.):
         super().__init__()
@@ -88,29 +95,31 @@ class LinearAttention2(nn.Module):
         self.proj_drop = nn.Dropout(proj_drop)
 
     def forward(self, x, attn_mask=None):
+        # x: [B, N, C] (N=785: 784 patches + 1 GCT token)
         B, N, C = x.shape
         qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
-        q, k, v = qkv[0], qkv[1], qkv[2]
+        q, k, v = qkv[0], qkv[1], qkv[2]  # each: [B, heads, N, head_dim]
 
-        # ELU+1 kernel — ensures non-negative, allows linear decomposition
+        # Non-negative kernel mapping
         q = nn.functional.elu(q) + 1.
         k = nn.functional.elu(k) + 1.
 
-        # Linear attention: O(N·d²) instead of O(N²·d)
+        # Linear attention: compute KV product first to avoid N x N matrix
         kv = torch.einsum('...sd,...se->...de', k, v)
         z = 1.0 / torch.einsum('...sd,...d->...s', q, k.sum(dim=-2))
         x = torch.einsum('...de,...sd,...s->...se', kv, q, z)
-        x = x.transpose(1, 2).reshape(B, N, C)
+        x = x.transpose(1, 2).reshape(B, N, C)  # [B, N, C]
 
         x = self.proj(x)
         x = self.proj_drop(x)
         return x
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# DECODER BLOCK & WEIGHT INIT
+# ─────────────────────────────────────────────────────────────────────────────
 class DecoderBlock(nn.Module):
-    """
-    Decoder Transformer Block used in Dinomaly (LinearAttention2 + MLP).
-    """
+    """Transformer Decoder Block with LinearAttention2 and MLP."""
     def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False,
                  drop=0., attn_drop=0., drop_path=0.,
                  act_layer=nn.GELU, norm_layer=nn.LayerNorm):
@@ -126,13 +135,14 @@ class DecoderBlock(nn.Module):
                        act_layer=act_layer, drop=drop)
 
     def forward(self, x, attn_mask=None):
+        # x: [B, N, C] -> [B, N, C]
         x = x + self.drop_path(self.attn(self.norm1(x)))
         x = x + self.drop_path(self.mlp(self.norm2(x)))
         return x
 
 
 def init_weights(module):
-    """Initialize weights following Dinomaly paper (trunc_normal std=0.01)."""
+    """Truncated normal initialization (std=0.01)."""
     if isinstance(module, nn.Linear):
         trunc_normal_(module.weight, std=0.01, a=-0.03, b=0.03)
         if module.bias is not None:
