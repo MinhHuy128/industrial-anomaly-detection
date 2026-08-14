@@ -1,16 +1,6 @@
 """
-ViTill-GCT: Paper-faithful Dinomaly architecture + Global Consistency Token (GCT).
-
-Architecture (faithful to Dinomaly paper, Section 3):
-  - Encoder: DINOv2-Register ViT-B/14 (frozen), multi-layer feature extraction
-  - Bottleneck: bMlp(768, 3072, 768, drop=0.2)
-  - Decoder: 8 × DecoderBlock with LinearAttention2 (O(N) complexity)
-  - GCT Token: Learned token injected after Bottleneck, conditioned on DINOv2 CLS
-  - Loss: global_cosine_hm_percent(encoder_feats, decoder_feats) + λ × GCT_cosine_loss
-
-Reference:
-  Kang et al., "Dinomaly: The Less Is More Philosophy in Multi-Class Unsupervised
-  Anomaly Detection", arXiv 2405.14325
+ViTill-GCT Model Architecture.
+Integrates frozen DINOv2-Register backbone, Bottleneck MLP, GCT Module, and 8-layer Decoder.
 """
 import math
 import sys
@@ -23,26 +13,20 @@ import torch.nn.functional as F
 
 from src.models.decoder_blocks import bMlp, DecoderBlock, init_weights
 
+
 # ─────────────────────────────────────────────────────────────────────────────
-# ENCODER: DINOv2-Register via torch.hub
+# BACKBONE ENCODER (DINOv2-Register)
 # ─────────────────────────────────────────────────────────────────────────────
 def load_dinov2_register(device: torch.device) -> nn.Module:
-    """
-    Load DINOv2-Register ViT-B/14 (4 register tokens) — paper default encoder.
-
-    Performance Optimization:
-      - If local torch hub cache exists (~/.cache/torch/hub/facebookresearch_dinov2_main),
-        loads instantly with source='local' (0.1s load time, ZERO network calls).
-      - Downloads only once on first run when cache is missing.
-    """
+    """Load and freeze DINOv2-Register ViT-B/14 backbone."""
     from pathlib import Path
     hub_dir = Path(torch.hub.get_dir()) / "facebookresearch_dinov2_main"
 
     if hub_dir.exists():
-        print(f"[BACKBONE] Loading DINOv2-Register from local hub cache ({hub_dir.name})...")
+        print(f"[BACKBONE] Loading DINOv2-Register from local cache ({hub_dir.name})...")
         backbone = torch.hub.load(str(hub_dir), 'dinov2_vitb14_reg', source='local').to(device)
     else:
-        print("[BACKBONE] First-time download of DINOv2-Register ViT-B/14 from Meta PyTorch Hub...")
+        print("[BACKBONE] Downloading DINOv2-Register ViT-B/14 from Meta PyTorch Hub...")
         import time
         max_retries = 3
         for attempt in range(1, max_retries + 1):
@@ -51,13 +35,10 @@ def load_dinov2_register(device: torch.device) -> nn.Module:
                 break
             except Exception as e:
                 if attempt < max_retries:
-                    print(f"[WARN] Backbone download attempt {attempt}/{max_retries} failed ({e}). Retrying in 2s...")
+                    print(f"[WARN] Backbone download attempt {attempt}/{max_retries} failed ({e}). Retrying...")
                     time.sleep(2)
                 else:
-                    raise RuntimeError(
-                        f"[ERROR] Unable to load DINOv2 backbone after {max_retries} attempts.\n"
-                        f"        Error details: {e}"
-                    ) from e
+                    raise RuntimeError(f"[ERROR] Failed to load DINOv2 backbone: {e}") from e
 
     backbone.eval()
     for param in backbone.parameters():
@@ -68,28 +49,25 @@ def load_dinov2_register(device: torch.device) -> nn.Module:
 
 def extract_intermediate_features(
     backbone: nn.Module,
-    x: torch.Tensor,
-    target_layers: list,   # e.g. [2,3,4,5,6,7,8,9]
+    x: torch.Tensor,        # [B, 3, 392, 392]
+    target_layers: list,   # [2, 3, 4, 5, 6, 7, 8, 9]
     return_cls: bool = True
 ):
     """
-    Extract intermediate patch token features from DINOv2 backbone.
-    Uses get_intermediate_layers() — official DINOv2 API.
-
+    Extract intermediate patch features and CLS token from DINOv2.
     Returns:
-        feat_list: list of [B, N_patches, 768] tensors (one per target layer)
-        cls_token:  [B, 768] CLS token from LAST target layer
+        feat_list: list of 8 x [B, 784, 768] patch feature tensors
+        cls_token:  [B, 768] global CLS token from the last target layer
     """
     outputs = backbone.get_intermediate_layers(
         x, n=target_layers, return_class_token=return_cls
     )
     if return_cls:
-        # outputs is list of (patch_tokens, cls_token) tuples
-        feat_list = [o[0] for o in outputs]   # [B, N, C] each
-        cls_token  = outputs[-1][1]            # [B, C] from last layer
+        feat_list = [o[0] for o in outputs]  # each: [B, 784, 768]
+        cls_token = outputs[-1][1]           # [B, 768]
     else:
         feat_list = outputs
-        cls_token  = None
+        cls_token = None
     return feat_list, cls_token
 
 
@@ -98,67 +76,41 @@ def extract_intermediate_features(
 # ─────────────────────────────────────────────────────────────────────────────
 class GCTModule(nn.Module):
     """
-    Global Consistency Token (GCT):
-      - A learnable token injected into the token sequence after Bottleneck.
-      - Passes through all 8 Decoder Blocks (attends to all patch tokens).
-      - AFTER decoder, the final GCT output is supervised via Cosine Distance
-        Loss against the frozen DINOv2 CLS token.
-
-    Design rationale:
-      Supervision on the FINAL decoder output (not the initial parameter) forces
-      the decoder to aggregate global semantic context through the attention
-      mechanism — this is the key mechanism enabling logical anomaly detection.
-
-    Loss formula (computed in ViTillGCT.forward after decoder):
-      gct_final = decoder_output[:, 0, :]   # GCT token position
-      L_gct = 1 - cosine_similarity(proj(gct_final), cls_token.detach())
+    Global Consistency Token module:
+    - Prepends a learnable GCT token [1, 1, C] to patch tokens before Decoder.
+    - Passes projected GCT token output through 1-layer Linear + LayerNorm head.
+    - Computes Cosine Distance loss against frozen DINOv2 CLS token.
     """
     def __init__(self, embed_dim: int = 768):
         super().__init__()
-        # Learnable GCT token (initialized small, same as Dinomaly weight init)
+        # Learnable GCT token: [1, 1, 768]
         self.gct_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
         nn.init.trunc_normal_(self.gct_token, std=0.01)
 
-        # 🎯 GCT V2: Streamlined 1-layer Linear + LayerNorm projection head
-        # Prevents Head Capacity Shortcut / Gradient Sinking, forcing full gradient backprop to 8 Decoder Blocks
+        # Projection head: 1-layer Linear + LayerNorm
         self.projection_head = nn.Sequential(
             nn.Linear(embed_dim, embed_dim),
             nn.LayerNorm(embed_dim),
         )
 
     def prepend(self, x: torch.Tensor) -> torch.Tensor:
-        """Prepend GCT token to token sequence. [B,N,C] → [B,N+1,C]"""
+        # x: [B, 784, 768] -> returns [B, 785, 768]
         B = x.shape[0]
-        gct = self.gct_token.expand(B, -1, -1)  # [B, 1, C]
-        return torch.cat([gct, x], dim=1)        # [B, N+1, C]
+        gct = self.gct_token.expand(B, -1, -1)  # [B, 1, 768]
+        return torch.cat([gct, x], dim=1)        # [B, 785, 768]
 
     def compute_loss(self, gct_final: torch.Tensor, cls_token: torch.Tensor) -> torch.Tensor:
-        """
-        Compute GCT loss on the FINAL decoder output of the GCT position.
-
-        Args:
-            gct_final: [B, C] — GCT token output from LAST decoder block
-            cls_token: [B, C] — DINOv2 CLS token (detach() is applied here)
-        Returns:
-            scalar loss
-        """
-        proj_gct = self.projection_head(gct_final)         # [B, C]
-        cls_detached = cls_token.detach()                  # NO gradient to backbone!
+        # gct_final: [B, 768], cls_token: [B, 768]
+        proj_gct = self.projection_head(gct_final)         # [B, 768]
+        cls_detached = cls_token.detach()                  # Freeze DINOv2 CLS gradient
         return (1.0 - F.cosine_similarity(proj_gct, cls_detached, dim=-1)).mean()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# VITILL-GCT: Full Model
+# VITILL-GCT FULL MODEL
 # ─────────────────────────────────────────────────────────────────────────────
 class ViTillGCT(nn.Module):
-    """
-    Paper-faithful Dinomaly + Global Consistency Token.
-
-    Encoder: DINOv2-Register ViT-B/14 (frozen, 8 intermediate layers)
-    Bottleneck: bMlp
-    GCT: 1 learnable token + projection head
-    Decoder: 8 × LinearAttention2 DecoderBlocks
-    """
+    """ViTill-GCT model: DINOv2 + Bottleneck + GCT + 8-layer Decoder."""
     def __init__(
         self,
         embed_dim: int = 768,
@@ -172,19 +124,18 @@ class ViTillGCT(nn.Module):
     ):
         super().__init__()
         if target_layers is None:
-            target_layers = [2, 3, 4, 5, 6, 7, 8, 9]   # 8 layers, paper default
+            target_layers = [2, 3, 4, 5, 6, 7, 8, 9]
         if fuse_layer_encoder is None:
             fuse_layer_encoder = [[0, 1, 2, 3], [4, 5, 6, 7]]
         if fuse_layer_decoder is None:
             fuse_layer_decoder = [[0, 1, 2, 3], [4, 5, 6, 7]]
 
-        self.target_layers   = target_layers
-        self.fuse_layer_enc  = fuse_layer_encoder
-        self.fuse_layer_dec  = fuse_layer_decoder
-        self.gct_lambda      = gct_lambda
-        self.embed_dim       = embed_dim
+        self.target_layers  = target_layers
+        self.fuse_layer_enc = fuse_layer_encoder
+        self.fuse_layer_dec = fuse_layer_decoder
+        self.gct_lambda     = gct_lambda
+        self.embed_dim      = embed_dim
 
-        # Bottleneck: single bMlp layer
         self.bottleneck = bMlp(
             in_features=embed_dim,
             hidden_features=embed_dim * 4,
@@ -192,10 +143,8 @@ class ViTillGCT(nn.Module):
             drop=bottleneck_drop
         )
 
-        # GCT Module
         self.gct = GCTModule(embed_dim=embed_dim)
 
-        # Decoder: 8 LinearAttention2 blocks
         self.decoder = nn.ModuleList([
             DecoderBlock(
                 dim=embed_dim,
@@ -207,82 +156,57 @@ class ViTillGCT(nn.Module):
             for _ in range(num_decoder_layers)
         ])
 
-        # Initialize weights (paper: trunc_normal std=0.01)
         self.bottleneck.apply(init_weights)
         for blk in self.decoder:
             blk.apply(init_weights)
 
     def fuse_features(self, feat_list: list, idxs: list) -> torch.Tensor:
-        """Average-fuse features from specified layer indices."""
+        # Fuse specified encoder/decoder feature layers: [B, N, C]
         selected = [feat_list[i] for i in idxs]
-        return torch.stack(selected, dim=0).mean(dim=0)  # [B, N, C]
+        return torch.stack(selected, dim=0).mean(dim=0)
 
     def forward(self, feat_list: list, cls_token: torch.Tensor):
-        """
-        Args:
-            feat_list: list of [B, N, C] tensors (8 intermediate encoder layers)
-            cls_token: [B, C] DINOv2 CLS token (from backbone, will be detached in gct.compute_loss)
+        # feat_list: 8 x [B, 784, 768], cls_token: [B, 768]
+        # 1. Average fuse 8 encoder layers
+        x = self.fuse_features(feat_list, list(range(len(feat_list))))  # [B, 784, 768]
 
-        Returns:
-            en:       list of [B, C, H, W] fused encoder feature maps
-            de:       list of [B, C, H, W] fused decoder feature maps
-            gct_loss: scalar GCT cosine distance loss (on FINAL decoder GCT output)
-        """
-        # Fuse encoder features into single representation
-        x = self.fuse_features(feat_list, list(range(len(feat_list))))  # [B, N, C]
+        # 2. Bottleneck MLP
+        x = self.bottleneck(x)  # [B, 784, 768]
 
-        # Bottleneck
-        x = self.bottleneck(x)  # [B, N, C]
+        # 3. Prepend GCT token at index 0
+        x = self.gct.prepend(x)  # [B, 785, 768]
 
-        # Inject GCT token (prepended at position 0)
-        x = self.gct.prepend(x)  # [B, N+1, C]
-
-        # Decode through 8 LinearAttention blocks, collect all outputs
+        # 4. Decode through 8 blocks, collect patch tokens
         de_list = []
         for blk in self.decoder:
-            x = blk(x)
-            # Strip GCT token (position 0) before collecting patch decoder features
-            de_list.append(x[:, 1:, :])  # [B, N, C]
+            x = blk(x)                   # [B, 785, 768]
+            de_list.append(x[:, 1:, :])  # [B, 784, 768] patch tokens only
 
-        # ✅ GCT loss on FINAL decoder output — x[:, 0, :] is the GCT token
-        # after attending to ALL patch tokens through all 8 decoder blocks.
-        # This is the correct supervision point: the decoder has aggregated
-        # global context into the GCT token, and we supervise it against CLS.
-        gct_final = x[:, 0, :]                            # [B, C]
+        # 5. GCT loss on final decoded GCT token (index 0)
+        gct_final = x[:, 0, :]                            # [B, 768]
         gct_loss  = self.gct.compute_loss(gct_final, cls_token)
 
-        de_list = de_list[::-1]  # Reverse for layer ordering (paper convention)
+        de_list = de_list[::-1]  # Reverse layer order
 
-        # Spatial reshape helper
+        # 6. Spatial reshape: [B, N, C] -> [B, C, 28, 28]
         N = feat_list[0].shape[1]
         side = int(math.sqrt(N))
-        assert side * side == N, (
-            f"[SHAPE ERROR] N={N} patches is not a perfect square. "
-            f"Check that crop_size is divisible by patch_size (14). "
-            f"Current crop_size should yield N=784 (28×28)."
-        )
         B, _, C = feat_list[0].shape
 
-        def to_spatial(t):  # [B, N, C] → [B, C, H, W]
+        def to_spatial(t):
             return t.permute(0, 2, 1).reshape(B, C, side, side).contiguous()
 
-        # Fuse encoder and decoder feature groups
-        en = [to_spatial(self.fuse_features(feat_list, idxs))
-              for idxs in self.fuse_layer_enc]
-        de = [to_spatial(self.fuse_features(de_list, idxs))
-              for idxs in self.fuse_layer_dec]
+        en = [to_spatial(self.fuse_features(feat_list, idxs)) for idxs in self.fuse_layer_enc]
+        de = [to_spatial(self.fuse_features(de_list, idxs))   for idxs in self.fuse_layer_dec]
 
         return en, de, gct_loss
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# BASELINE (no GCT) — for fair comparison
+# BASELINE MODEL (No GCT)
 # ─────────────────────────────────────────────────────────────────────────────
 class ViTillBaseline(nn.Module):
-    """
-    Paper-faithful Dinomaly Baseline (no GCT).
-    Identical architecture to ViTillGCT but without GCT token.
-    """
+    """Baseline model without GCT module for comparative benchmark."""
     def __init__(
         self,
         embed_dim: int = 768,
@@ -320,27 +244,22 @@ class ViTillBaseline(nn.Module):
         return torch.stack(selected, dim=0).mean(dim=0)
 
     def forward(self, feat_list: list):
-        x = self.fuse_features(feat_list, list(range(len(feat_list))))
-        x = self.bottleneck(x)
+        # feat_list: 8 x [B, 784, 768]
+        x = self.fuse_features(feat_list, list(range(len(feat_list))))  # [B, 784, 768]
+        x = self.bottleneck(x)                                          # [B, 784, 768]
         de_list = []
         for blk in self.decoder:
-            x = blk(x)
+            x = blk(x)          # [B, 784, 768]
             de_list.append(x)
         de_list = de_list[::-1]
 
         N = feat_list[0].shape[1]
         side = int(math.sqrt(N))
-        assert side * side == N, (
-            f"[SHAPE ERROR] N={N} patches is not a perfect square. "
-            f"Check that crop_size is divisible by patch_size (14)."
-        )
         B, _, C = feat_list[0].shape
 
         def to_spatial(t):
             return t.permute(0, 2, 1).reshape(B, C, side, side).contiguous()
 
-        en = [to_spatial(self.fuse_features(feat_list, idxs))
-              for idxs in self.fuse_layer_enc]
-        de = [to_spatial(self.fuse_features(de_list, idxs))
-              for idxs in self.fuse_layer_dec]
+        en = [to_spatial(self.fuse_features(feat_list, idxs)) for idxs in self.fuse_layer_enc]
+        de = [to_spatial(self.fuse_features(de_list, idxs))   for idxs in self.fuse_layer_dec]
         return en, de
