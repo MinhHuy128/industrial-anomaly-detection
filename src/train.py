@@ -1,16 +1,6 @@
 """
-Training script for ViTill-GCT (Paper-Strict Branch).
-
-Faithful to Dinomaly paper training protocol:
-  - Iteration-based: 5000 iterations (not epoch-based)
-  - Batch size: 16
-  - Image size: 448, Crop size: 392
-  - Optimizer: StableAdamW(lr=2e-3, betas=(0.9,0.999), wd=1e-4, amsgrad=True)
-  - Scheduler: WarmCosineScheduler(base=2e-3, final=2e-4, warmup=100)
-  - Loss: global_cosine_hm_percent(p=0.9, factor=0.1) + λ×GCT_cosine_loss
-  - Grad clipping: max_norm=0.1
-
-Reference: Kang et al., "Dinomaly: The Less Is More...", arXiv 2405.14325
+Training script for ViTill-GCT on MVTec LOCO AD.
+Executes 5000 iterations with StableAdamW, WarmCosineScheduler, and combined loss.
 """
 import sys
 if hasattr(sys.stdout, 'reconfigure'):
@@ -36,6 +26,7 @@ sys.path.append(str(ROOT))
 from src.models.vitill_gct import ViTillGCT, ViTillBaseline, load_dinov2_register, extract_intermediate_features
 from src.losses.cosine_loss import combined_loss, global_cosine_hm_percent
 
+
 # ─────────────────────────────────────────────────────────────────────────────
 # REPRODUCIBILITY
 # ─────────────────────────────────────────────────────────────────────────────
@@ -50,17 +41,12 @@ def set_deterministic(seed=SEED):
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
 
+
 # ─────────────────────────────────────────────────────────────────────────────
 # DATASET
 # ─────────────────────────────────────────────────────────────────────────────
 class MVTecLocoTrainDataset(Dataset):
-    """
-    Loads 'good' training images from MVTec LOCO AD.
-    Uses same transforms as Dinomaly paper:
-      - Resize to 448
-      - CenterCrop 392
-      - Normalize with ImageNet stats
-    """
+    """Loads normal ('good') training images from MVTec LOCO AD."""
     def __init__(self, category_root: Path, img_size: int = 448, crop_size: int = 392):
         train_dir = category_root / "train" / "good"
         if not train_dir.exists():
@@ -86,12 +72,13 @@ class MVTecLocoTrainDataset(Dataset):
         return len(self.img_paths)
 
     def __getitem__(self, idx):
+        # returns tensor: [3, 392, 392]
         img = Image.open(self.img_paths[idx]).convert("RGB")
         return self.transform(img)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# LOAD CONFIG
+# CONFIG LOADER
 # ─────────────────────────────────────────────────────────────────────────────
 def load_config(config_path: str) -> dict:
     path = Path(config_path)
@@ -107,13 +94,10 @@ def load_config(config_path: str) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SCHEDULER (WarmCosineScheduler from paper)
+# SCHEDULER (Linear Warmup + Cosine Decay)
 # ─────────────────────────────────────────────────────────────────────────────
 class WarmCosineScheduler:
-    """
-    Linear warmup + Cosine decay LR schedule (matches paper exactly).
-    Operates per-iteration (not per-epoch).
-    """
+    """Per-iteration linear warmup and cosine decay learning rate scheduler."""
     def __init__(self, optimizer, base_lr, final_lr, total_iters, warmup_iters=100):
         self.optimizer = optimizer
         warmup  = np.linspace(0., base_lr, warmup_iters)
@@ -131,13 +115,10 @@ class WarmCosineScheduler:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# STABLEADAMW (from paper's optimizers/)
+# OPTIMIZER (StableAdamW with RMS Norm Clipping)
 # ─────────────────────────────────────────────────────────────────────────────
 class StableAdamW(torch.optim.Optimizer):
-    """
-    AdamW with gradient clipping via RMS norm (Stable AdamW variant).
-    Taken verbatim from Dinomaly/optimizers/StableAdamW.py.
-    """
+    """AdamW optimizer with RMS norm gradient clipping."""
     def __init__(self, params, lr=2e-3, betas=(0.9, 0.999), eps=1e-8,
                  weight_decay=1e-4, amsgrad=True, clip_threshold=1.0):
         defaults = dict(lr=lr, betas=betas, eps=eps,
@@ -197,7 +178,7 @@ class StableAdamW(torch.optim.Optimizer):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# TRAINING FUNCTION
+# MAIN TRAINING LOOP
 # ─────────────────────────────────────────────────────────────────────────────
 def train(args):
     cfg    = load_config(args.config)
@@ -206,29 +187,29 @@ def train(args):
     set_deterministic(SEED)
 
     use_gct    = args.use_gct
-    model_name = "DINOMALY + GCT (Paper-Strict)" if use_gct else "DINOMALY BASELINE (Paper-Strict)"
+    model_name = "DINOMALY + GCT" if use_gct else "DINOMALY BASELINE"
     category   = args.category
 
-    print(f"[INFO] GPU : {torch.cuda.get_device_name(0) if device.type == 'cuda' else 'CPU'}")
+    print(f"[INFO] Device: {torch.cuda.get_device_name(0) if device.type == 'cuda' else 'CPU'}")
     print(f"[INFO] Model: {model_name}  |  Category: {category}")
     print(f"[SEED] {SEED}")
 
-    # ── Hyper-parameters (paper defaults) ─────────────────────────────────
-    TOTAL_ITERS  = cfg.get("train", {}).get("total_iters", 5000)
-    BATCH_SIZE   = cfg.get("train", {}).get("batch_size", 16)
-    IMG_SIZE     = cfg.get("dataset", {}).get("img_size", 448)
-    CROP_SIZE    = cfg.get("dataset", {}).get("crop_size", 392)
-    BASE_LR      = cfg.get("train", {}).get("learning_rate", 2e-3)
-    FINAL_LR     = cfg.get("train", {}).get("final_lr", 2e-4)
-    WARMUP_ITERS = cfg.get("train", {}).get("warmup_iters", 100)
-    WEIGHT_DECAY = cfg.get("train", {}).get("weight_decay", 1e-4)
-    GCT_LAMBDA   = cfg.get("train", {}).get("gct_lambda", 0.1)
-    HM_P         = cfg.get("train", {}).get("hm_p", 0.9)
-    HM_FACTOR    = cfg.get("train", {}).get("hm_factor", 0.1)
-    SAVE_DIR     = ROOT / cfg["train"]["save_dir"]
+    # Hyperparameters
+    TOTAL_ITERS   = cfg.get("train", {}).get("total_iters", 5000)
+    BATCH_SIZE    = cfg.get("train", {}).get("batch_size", 16)
+    IMG_SIZE      = cfg.get("dataset", {}).get("img_size", 448)
+    CROP_SIZE     = cfg.get("dataset", {}).get("crop_size", 392)
+    BASE_LR       = cfg.get("train", {}).get("learning_rate", 2e-3)
+    FINAL_LR      = cfg.get("train", {}).get("final_lr", 2e-4)
+    WARMUP_ITERS  = cfg.get("train", {}).get("warmup_iters", 100)
+    WEIGHT_DECAY  = cfg.get("train", {}).get("weight_decay", 1e-4)
+    GCT_LAMBDA    = cfg.get("train", {}).get("gct_lambda", 0.1)
+    HM_P          = cfg.get("train", {}).get("hm_p", 0.9)
+    HM_FACTOR     = cfg.get("train", {}).get("hm_factor", 0.1)
+    SAVE_DIR      = ROOT / cfg["train"]["save_dir"]
     TARGET_LAYERS = cfg.get("model", {}).get("target_layers", [2, 3, 4, 5, 6, 7, 8, 9])
 
-    # ── Dataset ────────────────────────────────────────────────────────────
+    # Dataset & DataLoader
     data_root = ROOT / cfg["dataset"]["data_path"] / category
     dataset   = MVTecLocoTrainDataset(data_root, img_size=IMG_SIZE, crop_size=CROP_SIZE)
     loader    = DataLoader(
@@ -239,14 +220,14 @@ def train(args):
         pin_memory=True,
         drop_last=True,
     )
-    print(f"[DATASET] Loaded {len(dataset)} training images from: {data_root / 'train/good'}")
+    print(f"[DATASET] Loaded {len(dataset)} images from: {data_root / 'train/good'}")
 
-    # ── Load DINOv2-Register Backbone (frozen) ─────────────────────────────
+    # Load frozen backbone
     backbone = load_dinov2_register(device)
 
-    # ── Build Model ────────────────────────────────────────────────────────
-    embed_dim     = cfg["model"]["embed_dim"]       # 768
-    num_decoder   = cfg["model"]["decoder_layers"]  # 8
+    # Build model
+    embed_dim   = cfg["model"]["embed_dim"]       # 768
+    num_decoder = cfg["model"]["decoder_layers"]  # 8
 
     if use_gct:
         model = ViTillGCT(
@@ -255,27 +236,24 @@ def train(args):
             target_layers=TARGET_LAYERS,
             gct_lambda=GCT_LAMBDA,
         ).to(device)
-        trainable_params = list(model.bottleneck.parameters()) + \
-                           list(model.decoder.parameters())    + \
-                           list(model.gct.parameters())
+        trainable_params = list(model.bottleneck.parameters()) +                            list(model.decoder.parameters())    +                            list(model.gct.parameters())
     else:
         model = ViTillBaseline(
             embed_dim=embed_dim,
             num_decoder_layers=num_decoder,
             target_layers=TARGET_LAYERS,
         ).to(device)
-        trainable_params = list(model.bottleneck.parameters()) + \
-                           list(model.decoder.parameters())
+        trainable_params = list(model.bottleneck.parameters()) +                            list(model.decoder.parameters())
 
-    # ── Optimizer & Scheduler ─────────────────────────────────────────────
-    optimizer  = StableAdamW(
+    # Optimizer & Scheduler
+    optimizer = StableAdamW(
         [{'params': trainable_params}],
         lr=BASE_LR, betas=(0.9, 0.999),
         weight_decay=WEIGHT_DECAY, amsgrad=True, eps=1e-8
     )
-    scheduler  = WarmCosineScheduler(optimizer, BASE_LR, FINAL_LR, TOTAL_ITERS, WARMUP_ITERS)
+    scheduler = WarmCosineScheduler(optimizer, BASE_LR, FINAL_LR, TOTAL_ITERS, WARMUP_ITERS)
 
-    # ── Training Loop (iteration-based, not epoch-based) ──────────────────
+    # Iteration-based training loop
     model.train()
     data_iter  = iter(loader)
     start_time = time.time()
@@ -284,32 +262,28 @@ def train(args):
     print(f"[TRAIN] Starting training loop for {TOTAL_ITERS} iterations...")
 
     for it in range(TOTAL_ITERS):
-        # Infinite data iterator
         try:
             imgs = next(data_iter)
         except StopIteration:
             data_iter = iter(loader)
             imgs = next(data_iter)
 
-        imgs = imgs.to(device, non_blocking=True)
+        imgs = imgs.to(device, non_blocking=True)  # [B, 3, 392, 392]
 
-        # Extract features from frozen DINOv2-Register backbone
+        # Extract features from frozen backbone
         with torch.no_grad():
             feat_list, cls_token = extract_intermediate_features(
                 backbone, imgs, TARGET_LAYERS, return_cls=True
             )
 
-        # Forward through Bottleneck + GCT + Decoder
         optimizer.zero_grad()
 
         if use_gct:
             en, de, gct_loss = model(feat_list, cls_token)
-            # Progressive p warmup: paper uses p = min(0.9 * it/1000, 0.9)
-            p_curr = min(HM_P * it / 1000.0, HM_P)
+            p_curr = min(HM_P * it / 1000.0, HM_P)  # Progressive p warmup: 0 -> 0.9
             loss = combined_loss(en, de, gct_loss, p=p_curr, factor=HM_FACTOR, gct_lambda=GCT_LAMBDA)
         else:
             en, de = model(feat_list)
-            # Progressive p warmup (same curriculum as paper)
             p_curr = min(HM_P * it / 1000.0, HM_P)
             loss = global_cosine_hm_percent(en, de, p=p_curr, factor=HM_FACTOR)
 
@@ -320,7 +294,6 @@ def train(args):
 
         loss_accum.append(loss.item())
 
-        # Logging every 100 iters
         if (it + 1) % 100 == 0:
             elapsed = time.time() - start_time
             avg_loss = np.mean(loss_accum)
@@ -336,14 +309,13 @@ def train(args):
     total_time = time.time() - start_time
     print(f"[SUCCESS] Training completed in {total_time:.1f} seconds.")
 
-    # ── Save Checkpoint ────────────────────────────────────────────────────
+    # Save checkpoint
     prefix    = "gct" if use_gct else "baseline"
     subfolder = "gct" if use_gct else "baseline"
     save_path = SAVE_DIR / subfolder
     save_path.mkdir(parents=True, exist_ok=True)
     ckpt_path = save_path / f"{prefix}_{category}_strict.pth"
 
-    # Only save trainable parameters (backbone is frozen, not included)
     save_dict = {
         "model_state": model.state_dict(),
         "category":    category,
@@ -354,12 +326,11 @@ def train(args):
     print(f"[SAVED] Checkpoint saved to: {ckpt_path.relative_to(ROOT)}")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Train ViTill-GCT on MVTec LOCO AD (Paper-Strict)")
+    parser = argparse.ArgumentParser(description="Train ViTill-GCT on MVTec LOCO AD")
     parser.add_argument("--config",   type=str, default="src/configs/loco_strict.json")
     parser.add_argument("--category", type=str, default="breakfast_box")
-    parser.add_argument("--use_gct",  action="store_true", help="Train GCT model (default: Baseline)")
+    parser.add_argument("--use_gct",  action="store_true", help="Train GCT model")
     parser.add_argument("--cpu",      action="store_true")
     args = parser.parse_args()
     train(args)
