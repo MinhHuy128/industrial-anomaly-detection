@@ -108,7 +108,7 @@ def infer_one(backbone, model, img_path: Path, transform, device, use_gct: bool,
     return score_final, amap
 
 # REGION OVERLAP METRIC: Normalized AUPRO (sPRO approximation, max_fpr=0.30)
-def calculate_au_pro(masks: list, amaps: list, max_fpr: float = 0.30, num_thresholds: int = 500) -> float:
+def calculate_au_pro(masks: list, amaps: list, max_fpr: float = 0.30, num_thresholds: int = 500  # 500 quantiles for smooth curve) -> float:
     """
     Computes Normalized AUPRO (sPRO approximation, max_fpr = 0.30).
     Uses connected-component region labeling via scipy.ndimage.label.
