@@ -371,7 +371,7 @@ def evaluate(args):
     # Save Anomaly Maps if requested (TIFF float32 for official MVTec evaluator + PNG for visualization)
     if getattr(args, "save_maps", False):
         try:
-            # tifffile placeholder
+            import tifffile
         except ImportError:
             tifffile = None
 
