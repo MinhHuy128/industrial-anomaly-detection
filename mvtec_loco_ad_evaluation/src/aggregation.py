@@ -530,8 +530,26 @@ class MetricsAggregator:
         equidistant_indices = equidistant_indices[1:-1]
         equiheight_scores = sampled_scores[equidistant_indices]
 
-        # Combine the minimum, the maximum and the equidistant anomaly scores
-        # to form the list of thresholds, sorted in descending order.
-        thresholds = equiheight_scores.tolist()[::-1]
-        thresholds = [max_threshold] + thresholds + [min_threshold]
+        # Sort and take unique values from sampled scores to prevent duplicate plateau thresholds
+        sampled_unique = np.unique(sampled_scores)
+        sampled_unique.sort()
+
+        if len(sampled_unique) > num_thresholds:
+            equidistant_indices = np.linspace(0, len(sampled_unique) - 1,
+                                              num=num_thresholds,
+                                              endpoint=True,
+                                              dtype=int)
+            equidistant_indices = equidistant_indices[1:-1]
+            equiheight_scores = sampled_unique[equidistant_indices]
+        else:
+            equiheight_scores = sampled_unique[1:-1] if len(sampled_unique) > 2 else []
+
+        raw_thresholds = [max_threshold] + equiheight_scores.tolist()[::-1] + [min_threshold]
+        
+        # Ensure strictly descending and strictly unique thresholds
+        thresholds = []
+        for t in raw_thresholds:
+            if not thresholds or float(t) < thresholds[-1]:
+                thresholds.append(float(t))
+
         return thresholds
