@@ -131,8 +131,8 @@ L_{\text{total}} = L_{\text{rec}} + \lambda \cdot L_{\text{GCT}} \qquad (\lambda
 - Scikit-learn, SciPy, Pillow, Tifffile, Tabulate, Tqdm
 
 ```bash
-git clone https://github.com/<your-username>/industrial-anomoly-detection.git
-cd industrial-anomoly-detection
+git clone https://github.com/MinhHuy128/industrial-anomaly-detection.git
+cd industrial-anomaly-detection
 pip install -r requirements.txt
 ```
 
