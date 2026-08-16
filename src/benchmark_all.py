@@ -87,9 +87,9 @@ def run_full_benchmark(config_path: str, save_maps: bool = False):
             "logical_auroc": mean_log,
             "structural_auroc": mean_struct,
             "mean_auroc": mean_all,
-            
-            
-            
+            "logical_f1": mean_log_f1,
+            "structural_f1": mean_str_f1,
+            "mean_f1": mean_f1_all,
             "spro": mean_spro,
             "latency_ms": mean_lat,
             "fps": mean_fps

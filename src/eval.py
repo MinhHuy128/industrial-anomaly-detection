@@ -39,6 +39,16 @@ def compute_auroc(labels, scores):
         rank_sum = sum(np.sum(p > neg) + 0.5 * np.sum(p == neg) for p in pos)
         return (rank_sum / (len(pos) * len(neg))) * 100.0
 
+def compute_f1_max(labels, scores):
+    """Compute optimal Image-level F1-max score across all thresholds (0 - 100%)."""
+    try:
+        from sklearn.metrics import precision_recall_curve
+        precision, recall, _ = precision_recall_curve(labels, scores)
+        f1_scores = 2 * (precision * recall) / (precision + recall + 1e-8)
+        return float(np.nanmax(f1_scores)) * 100.0
+    except Exception:
+        return 0.0
+
 # ANOMALY MAP GENERATION & SPATIAL ALIGNMENT
 def compute_anomaly_map(en_list, de_list, crop_size: int = 392, out_size: int = 448) -> np.ndarray:
     """
@@ -108,7 +118,7 @@ def infer_one(backbone, model, img_path: Path, transform, device, use_gct: bool,
     return score_final, amap
 
 # REGION OVERLAP METRIC: Normalized AUPRO (sPRO approximation, max_fpr=0.30)
-def calculate_au_pro(masks: list, amaps: list, max_fpr: float = 0.30, num_thresholds: int = 500  # 500 quantiles for smooth curve) -> float:
+def calculate_au_pro(masks: list, amaps: list, max_fpr: float = 0.30, num_thresholds: int = 500) -> float:
     """
     Computes Normalized AUPRO (sPRO approximation, max_fpr = 0.30).
     Uses connected-component region labeling via scipy.ndimage.label.
@@ -402,9 +412,9 @@ def evaluate(args):
         "logical_auroc": float(log_auroc),
         "structural_auroc": float(struct_auroc),
         "mean_auroc": float(mean_auroc),
-        
-        
-        
+        "logical_f1": float(log_f1),
+        "structural_f1": float(struct_f1),
+        "mean_f1": float(mean_f1),
         "spro": float(spro),
         "latency_ms": float(latency_ms),
         "fps": float(fps)
