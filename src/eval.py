@@ -23,10 +23,7 @@ sys.path.append(str(ROOT))
 
 from src.models.vitill_gct import ViTillGCT, ViTillBaseline, load_dinov2_register, extract_intermediate_features
 
-
-# ─────────────────────────────────────────────────────────────────────────────
 # AUROC CALCULATION
-# ─────────────────────────────────────────────────────────────────────────────
 def compute_auroc(labels, scores):
     """Compute ROC-AUC percentage (0 - 100%)."""
     try:
@@ -42,10 +39,17 @@ def compute_auroc(labels, scores):
         rank_sum = sum(np.sum(p > neg) + 0.5 * np.sum(p == neg) for p in pos)
         return (rank_sum / (len(pos) * len(neg))) * 100.0
 
+def compute_f1_max(labels, scores):
+    """Compute optimal Image-level F1-max score across all thresholds (0 - 100%)."""
+    try:
+        from sklearn.metrics import precision_recall_curve
+        precision, recall, _ = precision_recall_curve(labels, scores)
+        f1_scores = 2 * (precision * recall) / (precision + recall + 1e-8)
+        return float(np.nanmax(f1_scores)) * 100.0
+    except Exception:
+        return 0.0
 
-# ─────────────────────────────────────────────────────────────────────────────
 # ANOMALY MAP GENERATION & SPATIAL ALIGNMENT
-# ─────────────────────────────────────────────────────────────────────────────
 def compute_anomaly_map(en_list, de_list, crop_size: int = 392, out_size: int = 448) -> np.ndarray:
     """
     Computes per-patch cosine distance anomaly map with exact spatial alignment.
@@ -78,20 +82,14 @@ def compute_anomaly_map(en_list, de_list, crop_size: int = 392, out_size: int = 
     smooth_amap = gaussian_filter(canvas, sigma=4)
     return smooth_amap
 
-
-# ─────────────────────────────────────────────────────────────────────────────
 # IMAGE SCORE POOLING
-# ─────────────────────────────────────────────────────────────────────────────
 def image_score(anomaly_map: np.ndarray, max_ratio: float = 0.01) -> float:
     """Compute image-level score via Top-1% mean percentile pooling."""
     flat = anomaly_map.flatten()
     k    = max(1, int(len(flat) * max_ratio))
     return float(np.sort(flat)[-k:].mean())
 
-
-# ─────────────────────────────────────────────────────────────────────────────
 # SINGLE IMAGE INFERENCE (Dual-Stream Scoring)
-# ─────────────────────────────────────────────────────────────────────────────
 @torch.no_grad()
 def infer_one(backbone, model, img_path: Path, transform, device, use_gct: bool,
               target_layers: list, out_size: int, crop_size: int = 392, gamma: float = 1.0) -> tuple:
@@ -119,16 +117,95 @@ def infer_one(backbone, model, img_path: Path, transform, device, use_gct: bool,
     score_final = score_patch + (gamma * score_gct if use_gct else 0.0)
     return score_final, amap
 
+# REGION OVERLAP METRIC: Normalized AUPRO (sPRO approximation, max_fpr=0.30)
+def calculate_au_pro(masks: list, amaps: list, max_fpr: float = 0.30, num_thresholds: int = 500) -> float:
+    """
+    Computes Normalized AUPRO (sPRO approximation, max_fpr = 0.30).
+    Uses connected-component region labeling via scipy.ndimage.label.
+    """
+    from scipy.ndimage import label as cc_label
+    from sklearn.metrics import auc
 
-# ─────────────────────────────────────────────────────────────────────────────
-# SPRO PIXEL METRIC
-# ─────────────────────────────────────────────────────────────────────────────
+    if len(masks) == 0 or len(amaps) == 0:
+        return 0.0
+
+    # 1. Identify connected component regions across all GT masks
+    labeled_regions = []
+    total_region_count = 0
+    for mask in masks:
+        labeled_mask, num_features = cc_label(mask)
+        labeled_regions.append((labeled_mask, num_features))
+        total_region_count += num_features
+
+    if total_region_count == 0:
+        return 100.0
+
+    # 2. Extract candidate thresholds from predictions
+    all_amaps_flat = np.concatenate([a.flatten() for a in amaps])
+    thresholds     = np.quantile(all_amaps_flat, np.linspace(0.0, 1.0, num_thresholds))
+
+    # Mask of normal/background pixels across all test images
+    all_masks_flat    = np.concatenate([m.flatten() for m in masks])
+    num_normal_pixels = np.sum(all_masks_flat == 0)
+
+    if num_normal_pixels == 0:
+        return 0.0
+
+    pros, fprs = [], []
+
+    # 3. Scan thresholds from highest to lowest
+    for th in reversed(thresholds):
+        fp_count = np.sum((all_amaps_flat >= th) & (all_masks_flat == 0))
+        fpr      = fp_count / num_normal_pixels
+
+        region_overlaps = []
+        for amap, (labeled_mask, num_features) in zip(amaps, labeled_regions):
+            if num_features == 0:
+                continue
+            pred_bin = (amap >= th)
+            for region_idx in range(1, num_features + 1):
+                region_mask = (labeled_mask == region_idx)
+                region_size = np.sum(region_mask)
+                if region_size > 0:
+                    overlap = np.sum(pred_bin & region_mask) / region_size
+                    region_overlaps.append(overlap)
+
+        pro = np.mean(region_overlaps) if len(region_overlaps) > 0 else 0.0
+        pros.append(pro)
+        fprs.append(fpr)
+
+    # 4. Filter curve up to max_fpr (0.30)
+    fprs = np.array(fprs)
+    pros = np.array(pros)
+
+    unique_fprs, unique_indices = np.unique(fprs, return_index=True)
+    unique_pros = pros[unique_indices]
+
+    valid_mask = unique_fprs <= max_fpr
+    valid_fprs = unique_fprs[valid_mask]
+    valid_pros = unique_pros[valid_mask]
+
+    if len(valid_fprs) < 2:
+        return 0.0
+
+    if valid_fprs[0] > 0.0:
+        valid_fprs = np.insert(valid_fprs, 0, 0.0)
+        valid_pros = np.insert(valid_pros, 0, 0.0)
+
+    if valid_fprs[-1] < max_fpr:
+        valid_pros = np.append(valid_pros, valid_pros[-1])
+        valid_fprs = np.append(valid_fprs, max_fpr)
+
+    # 5. Integrate area under curve and normalize by max_fpr
+    au_pro = auc(valid_fprs, valid_pros) / max_fpr
+    return float(au_pro * 100.0)
+
 def compute_spro(backbone, model, test_path: Path, transform, device,
                  use_gct: bool, target_layers: list, img_size: int, crop_size: int = 392, gamma: float = 1.0) -> float:
-    """Calculate sPRO (Structural Pseudo-ROC) metric over FPR range [0, 0.30]."""
+    """Calculate Normalized AUPRO (sPRO, max_fpr=0.30) using connected component analysis."""
     gt_root    = test_path.parent / "ground_truth"
     anom_types = ["logical_anomalies", "structural_anomalies"]
-    all_gt, all_pred = [], []
+    all_masks, all_amaps = [], []
 
     for anom_type in anom_types:
         anom_dir = test_path / anom_type
@@ -143,33 +220,26 @@ def compute_spro(backbone, model, test_path: Path, transform, device,
                 mask_path = gt_dir / (stem + ".png")
             if not mask_path.exists():
                 continue
+            # Use NEAREST interpolation to preserve binary mask boundary integrity
+            resample_mode = getattr(Image, "Resampling", Image).NEAREST
             gt_mask = np.array(Image.open(mask_path).convert("L").resize(
-                (img_size, img_size))) > 0
+                (img_size, img_size), resample=resample_mode)) > 0
 
             _, amap = infer_one(backbone, model, p, transform, device, use_gct, target_layers, img_size, crop_size=crop_size, gamma=gamma)
-            all_gt.append(gt_mask.flatten())
-            all_pred.append(amap.flatten())
+            all_masks.append(gt_mask)
+            all_amaps.append(amap)
 
-    if len(all_gt) == 0:
-        return -1.0
+    # Also add normal good images (with zero masks) for accurate background FPR calculation
+    good_dir = test_path / "good"
+    if good_dir.exists():
+        for p in sorted(list(good_dir.glob("*.png")) + list(good_dir.glob("*.jpg"))):
+            _, amap = infer_one(backbone, model, p, transform, device, use_gct, target_layers, img_size, crop_size=crop_size, gamma=gamma)
+            all_masks.append(np.zeros((img_size, img_size), dtype=bool))
+            all_amaps.append(amap)
 
-    all_gt   = np.concatenate(all_gt)
-    all_pred = np.concatenate(all_pred)
+    return calculate_au_pro(all_masks, all_amaps, max_fpr=0.30, num_thresholds=500)
 
-    spro_vals = []
-    for fpr_limit in np.linspace(0, 0.30, 100):
-        thresh   = np.percentile(all_pred, (1 - fpr_limit) * 100)
-        pred_bin = all_pred >= thresh
-        tp = np.sum(pred_bin & all_gt)
-        fn = np.sum(~pred_bin & all_gt)
-        spro_vals.append(tp / (tp + fn) if (tp + fn) > 0 else 0.)
-
-    return float(np.mean(spro_vals)) * 100.0
-
-
-# ─────────────────────────────────────────────────────────────────────────────
 # MAIN EVALUATION FUNCTION
-# ─────────────────────────────────────────────────────────────────────────────
 def evaluate(args):
     path = Path(args.config)
     if path.suffix == ".json":
@@ -263,11 +333,17 @@ def evaluate(args):
     struct_auroc = compute_auroc(struct_labels, struct_scores)
     mean_auroc   = (log_auroc + struct_auroc) / 2.0
 
-    print(f"[METRICS] Logical AUROC   : {log_auroc:.2f}%")
-    print(f"[METRICS] Structural AUROC: {struct_auroc:.2f}%")
-    print(f"[METRICS] Mean AUROC      : {mean_auroc:.2f}%")
+    log_f1    = compute_f1_max(log_labels, log_scores)
+    struct_f1 = compute_f1_max(struct_labels, struct_scores)
+    mean_f1   = (log_f1 + struct_f1) / 2.0
+
+    print(f"[METRICS] Logical AUROC   : {log_auroc:.2f}%  (F1-max: {log_f1:.2f}%)")
+    print(f"[METRICS] Structural AUROC: {struct_auroc:.2f}%  (F1-max: {struct_f1:.2f}%)")
+    print(f"[METRICS] Mean AUROC      : {mean_auroc:.2f}%  (Mean F1: {mean_f1:.2f}%)")
 
     # Latency benchmark (batch_size=1)
+    latency_ms = 0.0
+    fps = 0.0
     dummy_img = test_path / "good"
     sample_imgs = sorted(list(dummy_img.glob("*.png")) + list(dummy_img.glob("*.jpg")))
     if len(sample_imgs) > 0:
@@ -286,18 +362,71 @@ def evaluate(args):
             torch.cuda.synchronize()
         t1 = time.time()
         latency_ms = ((t1 - t0) / n_runs) * 1000.0
-        print(f"[LATENCY] Batch=1 Inference Latency: {latency_ms:.2f} ms/image")
+        fps = 1000.0 / latency_ms if latency_ms > 0 else 0.0
+        print(f"[LATENCY] Batch=1 Inference Latency: {latency_ms:.2f} ms/image ({fps:.1f} FPS)")
 
     spro = compute_spro(backbone, model, test_path, transform, device, use_gct, target_layers, img_size, crop_size=crop_size, gamma=gamma)
     print(f"[METRICS] sPRO (pixel-level): {spro:.2f}%")
 
+    # Save Anomaly Maps if requested (TIFF float32 for official MVTec evaluator + PNG for visualization)
+    if getattr(args, "save_maps", False):
+        try:
+            import tifffile
+        except ImportError:
+            tifffile = None
+
+        save_root = ROOT / "outputs" / "anomaly_maps" / ("gct" if use_gct else "baseline") / category / "test"
+        print(f"[MAPS] Saving anomaly maps to: {save_root.relative_to(ROOT)} ...")
+        for sub_type in ["good", "logical_anomalies", "structural_anomalies"]:
+            sub_dir = test_path / sub_type
+            if not sub_dir.exists():
+                continue
+            out_sub_dir = save_root / sub_type
+            out_sub_dir.mkdir(parents=True, exist_ok=True)
+            for p in sorted(list(sub_dir.glob("*.png")) + list(sub_dir.glob("*.jpg"))):
+                _, amap = infer_one(backbone, model, p, transform, device, use_gct, target_layers, img_size, crop_size=crop_size, gamma=gamma)
+                
+                # Get original image dimensions
+                with Image.open(p) as raw_img:
+                    orig_w, orig_h = raw_img.size
+
+                # Resize anomaly map to match original image resolution
+                amap_pil = Image.fromarray(amap.astype(np.float32))
+                amap_orig = np.array(amap_pil.resize((orig_w, orig_h), resample=Image.BILINEAR))
+
+                # 1. Save official TIFF float32 format (Required by MVTec evaluate_experiment.py)
+                if tifffile is not None:
+                    tifffile.imwrite(str(out_sub_dir / f"{p.stem}.tiff"), amap_orig.astype(np.float32))
+                
+                # 2. Save normalized PNG for easy human visualization
+                amap_norm = (amap - amap.min()) / (amap.max() - amap.min() + 1e-8)
+                amap_vis  = Image.fromarray((amap_norm * 255).astype(np.uint8))
+                amap_vis.save(out_sub_dir / f"{p.stem}.png")
+
+        print(f"[MAPS] Done saving maps (.tiff & .png) for {category}.")
+
+    return {
+        "category": category,
+        "model": model_name,
+        "use_gct": use_gct,
+        "logical_auroc": float(log_auroc),
+        "structural_auroc": float(struct_auroc),
+        "mean_auroc": float(mean_auroc),
+        "logical_f1": float(log_f1),
+        "structural_f1": float(struct_f1),
+        "mean_f1": float(mean_f1),
+        "spro": float(spro),
+        "latency_ms": float(latency_ms),
+        "fps": float(fps)
+    }
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Evaluate ViTill-GCT on MVTec LOCO AD")
-    parser.add_argument("--config",   type=str, default="src/configs/loco_strict.json")
-    parser.add_argument("--category", type=str, default="breakfast_box")
-    parser.add_argument("--use_gct",  action="store_true", help="Evaluate GCT model")
-    parser.add_argument("--gamma",    type=float, default=None, help="GCT active score weight gamma (default: 1.0)")
-    parser.add_argument("--cpu",      action="store_true")
+    parser.add_argument("--config",    type=str, default="src/configs/loco_strict.json")
+    parser.add_argument("--category",  type=str, default="breakfast_box")
+    parser.add_argument("--use_gct",   action="store_true", help="Evaluate GCT model")
+    parser.add_argument("--gamma",     type=float, default=None, help="GCT active score weight gamma (default: 1.0)")
+    parser.add_argument("--save_maps", action="store_true", help="Save predicted anomaly maps to disk for official MVTec evaluation")
+    parser.add_argument("--cpu",       action="store_true")
     args = parser.parse_args()
     evaluate(args)
