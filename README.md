@@ -63,9 +63,9 @@ L_{\text{total}} = L_{\text{rec}} + \lambda \cdot L_{\text{GCT}} \qquad (\lambda
 | **BREAKFAST_BOX** | **91.94%** | 90.70% | **91.32%** | **86.66%** | 61.63% | 70.89 ms | 14.1 |
 | **JUICE_BOTTLE** | **94.10%** | 97.94% | **96.02%** | **91.35%** | 82.44% | 46.39 ms | 21.6 |
 | **PUSHPINS** | **56.65%** | **82.99%** | **69.82%** | **64.38%** | 65.87% | 56.60 ms | 17.7 |
-| **SCREW_BAG** | **68.63%** 🔥(+9.44%) | **94.26%** (+1.03%) | **81.44%** (+5.23%) | 78.55% | 65.14% | 57.04 ms | 17.5 |
+| **SCREW_BAG** | **68.63%** (+9.44%) | **94.26%** (+1.03%) | **81.44%** (+5.23%) | 78.55% | 65.14% | 57.04 ms | 17.5 |
 | **SPLICING_CONNECTORS** | **90.32%** | 99.31% | **94.81%** | **89.98%** | 79.03% | 54.28 ms | 18.4 |
-| **MEAN** | 🏆 **80.33%** (+3.93%) | 🏆 **93.04%** (+0.10%) | 🏆 **86.68%** (+2.02%) | 🏆 **82.19%** (+1.08%) | **70.82%** | **57.04 ms** | **17.9** |
+| **MEAN** |  **80.33%** (+3.93%) |  **93.04%** (+0.10%) |  **86.68%** (+2.02%) |  **82.19%** (+1.08%) | **70.82%** | **57.04 ms** | **17.9** |
 
 #### Table 2: DINOMALY BASELINE (Paper-Strict Baseline)
 
@@ -84,12 +84,12 @@ L_{\text{total}} = L_{\text{rec}} + \lambda \cdot L_{\text{GCT}} \qquad (\lambda
 
 | Evaluation Metric | Target Level | Baseline (Dinomaly) | ViTill-GCT V2 (Ours) | Delta / Improvement | Status |
 |:---|:---:|:---:|:---:|:---:|:---:|
-| **Logical AUROC** | Image-level | 76.40% | **80.33%** | **+3.93%** 🏆 | Decisive SOTA Gain (5/5 Cats) |
+| **Logical AUROC** | Image-level | 76.40% | **80.33%** | **+3.93%**  | Gain |
 | **Structural AUROC** | Image-level | 92.94% | **93.04%** | **+0.10%** | Preserved (No Forgetting) |
-| **Mean AUROC** | Image-level | 84.67% | **86.68%** | **+2.02%** 🏆 | Comprehensive Superiority |
-| **Optimal F1-Score (F1-max)** | Image-level | 81.11% | **82.19%** | **+1.08%** 🏆 | Robust Operating Point |
+| **Mean AUROC** | Image-level | 84.67% | **86.68%** | **+2.02%**  | Gain |
+| **Optimal F1-Score (F1-max)** | Image-level | 81.11% | **82.19%** | **+1.08%**  | Robust Operating Point |
 | **Official sPRO @ FPR=0.05** | Pixel-level | 71.28% | **70.82%** | -0.46% | Official MVTec Benchmark |
-| **Inference Latency** | System (batch=1) | 57.09 ms | **57.04 ms** | **0.0% Overhead** | ⚡ Real-Time (~17.9 FPS) |
+| **Inference Latency** | System (batch=1) | 57.09 ms | **57.04 ms** | **0.0% Overhead** |  Inference Time (~17.9 FPS) |
 
 ---
 
