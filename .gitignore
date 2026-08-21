@@ -14,8 +14,8 @@ venv/
 .vscode/
 .DS_Store
 
-# Dataset (large files — never commit)
-data/
+# Dataset (large files - never commit)
+/data/
 
 # Checkpoints & Experiments
 experiments/*.pth
@@ -27,11 +27,37 @@ experiments/**/*.log
 # Eval logs
 eval_logs/
 
-# Generated figures (tracked for README visual results)
-# docs/figures/
+# Figures (only track essential benchmark charts and key qualitative examples)
+docs/figures/heatmap_*.png
+!docs/figures/heatmap_screw_bag_logical_anomalies_1.png
+!docs/figures/heatmap_breakfast_box_logical_anomalies_1.png
+
 
 # Private self-study presentation guides & detailed reports (local only)
 docs/thuyet_trinh/
 docs/present/
 docs/experimental_results.md
+present/
+tmp_2/
+code_tmp/
+val_tmp/
+next_step/
+scratch/
+chinh_thuc.md
+
+# External sub-repos / benchmarks
+Dinomaly/
+mvtec_lo_ad_evaluation/
+
+# Backups and archives
+*.bundle
+results/*
+!results/benchmark_official.json
+!results/benchmark_official.md
+!results/final_summary.json
+!results/final_table.md
+!results/final_table.tex
+!results/gamma_sweep_study.json
+!results/xai_reports/
+
 
