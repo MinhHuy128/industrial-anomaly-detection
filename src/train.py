@@ -1,6 +1,5 @@
 """
-Training script for ViTill-GCT on MVTec LOCO AD.
-Executes 5000 iterations with StableAdamW, WarmCosineScheduler, and combined loss.
+Training script for ViTill-GCT on MVTec LOCO.
 """
 import sys
 if hasattr(sys.stdout, 'reconfigure'):
@@ -31,10 +30,7 @@ sys.path.append(str(ROOT))
 from src.models.vitill_gct import ViTillGCT, ViTillBaseline, load_dinov2_register, extract_intermediate_features
 from src.losses.cosine_loss import combined_loss, global_cosine_hm_percent
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# REPRODUCIBILITY
-# ─────────────────────────────────────────────────────────────────────────────
+# seed
 SEED = 42
 
 def set_deterministic(seed=SEED):
@@ -47,11 +43,7 @@ def set_deterministic(seed=SEED):
         torch.backends.cudnn.benchmark = False
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# DATASET
-# ─────────────────────────────────────────────────────────────────────────────
 class MVTecLocoTrainDataset(Dataset):
-    """Loads normal ('good') training images from MVTec LOCO AD."""
     def __init__(self, category_root: Path, img_size: int = 448, crop_size: int = 392):
         train_dir = category_root / "train" / "good"
         if not train_dir.exists():
@@ -77,14 +69,10 @@ class MVTecLocoTrainDataset(Dataset):
         return len(self.img_paths)
 
     def __getitem__(self, idx):
-        # returns tensor: [3, 392, 392]
         img = Image.open(self.img_paths[idx]).convert("RGB")
         return self.transform(img)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# CONFIG LOADER
-# ─────────────────────────────────────────────────────────────────────────────
 def load_config(config_path: str) -> dict:
     path = Path(config_path)
     if path.suffix == ".json":
@@ -98,11 +86,8 @@ def load_config(config_path: str) -> dict:
         raise RuntimeError("PyYAML not installed. Use .json config.")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# SCHEDULER (Linear Warmup + Cosine Decay)
-# ─────────────────────────────────────────────────────────────────────────────
+# warmup + cosine decay
 class WarmCosineScheduler:
-    """Per-iteration linear warmup and cosine decay learning rate scheduler."""
     def __init__(self, optimizer, base_lr, final_lr, total_iters, warmup_iters=100):
         self.optimizer = optimizer
         warmup  = np.linspace(0., base_lr, warmup_iters)
@@ -119,9 +104,6 @@ class WarmCosineScheduler:
         self._step += 1
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# OPTIMIZER (StableAdamW with RMS Norm Clipping)
-# ─────────────────────────────────────────────────────────────────────────────
 class StableAdamW(torch.optim.Optimizer):
     """AdamW optimizer with RMS norm gradient clipping."""
     def __init__(self, params, lr=2e-3, betas=(0.9, 0.999), eps=1e-8,
@@ -182,9 +164,7 @@ class StableAdamW(torch.optim.Optimizer):
         return loss
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# MAIN TRAINING LOOP
-# ─────────────────────────────────────────────────────────────────────────────
+# main training routine
 def train(args):
     cfg    = load_config(args.config)
     device = torch.device("cpu" if args.cpu or not torch.cuda.is_available()
@@ -192,7 +172,7 @@ def train(args):
     set_deterministic(SEED)
 
     use_gct    = args.use_gct
-    model_name = "DINOMALY + GCT" if use_gct else "DINOMALY BASELINE"
+    model_name = "ViTill-GCT (Proposed)" if use_gct else "Comparative Baseline"
     category   = args.category
     timestamp  = time.strftime("%Y%m%d_%H%M%S")
 
