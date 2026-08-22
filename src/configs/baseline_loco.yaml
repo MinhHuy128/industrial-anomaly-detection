@@ -1,7 +1,7 @@
 # Baseline Configuration for MVTec LOCO AD
 
 project:
-  name: "Dinomaly_Baseline_LOCO"
+  name: "ViTill_Baseline_LOCO"
   seed: 42
   device: "cuda" # Set to "cpu" for local dry testing
 

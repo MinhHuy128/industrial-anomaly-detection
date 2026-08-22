@@ -1,6 +1,6 @@
 {
   "project": {
-    "name": "Dinomaly_GCT_PaperStrict",
+    "name": "ViTill_GCT_PaperStrict",
     "seed": 42,
     "device": "cuda"
   },
