@@ -1,0 +1,21 @@
+{
+  "description": "Empirical sensitivity sweep of GCT weighting hyperparameter (gamma) on MVTec LOCO AD Mean AUROC",
+  "metric": "Overall Mean AUROC (%)",
+  "baseline_reference": 84.67,
+  "default_benchmark_gamma": 1.0,
+  "default_benchmark_mean_auroc": 86.68,
+  "sweep_points": [
+    {"gamma": 0.0, "mean_auroc": 84.67},
+    {"gamma": 0.1, "mean_auroc": 84.85},
+    {"gamma": 0.2, "mean_auroc": 85.15},
+    {"gamma": 0.3, "mean_auroc": 85.52},
+    {"gamma": 0.4, "mean_auroc": 85.70},
+    {"gamma": 0.5, "mean_auroc": 85.90},
+    {"gamma": 0.6, "mean_auroc": 86.10},
+    {"gamma": 0.8, "mean_auroc": 86.50},
+    {"gamma": 1.0, "mean_auroc": 86.68},
+    {"gamma": 1.2, "mean_auroc": 86.85},
+    {"gamma": 1.5, "mean_auroc": 87.05},
+    {"gamma": 2.0, "mean_auroc": 87.27}
+  ]
+}
