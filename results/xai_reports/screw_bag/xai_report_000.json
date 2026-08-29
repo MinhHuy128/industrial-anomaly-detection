@@ -1,0 +1,10 @@
+{
+  "status": "DEFECT DETECTED",
+  "anomaly_score": 1.0365,
+  "threshold": 0.35,
+  "defect_classification": "Logical Anomaly (Specification Violation)",
+  "localized_region": "High anomaly density centered at localized crop coordinates",
+  "root_cause_diagnosis": "Detected significant visual discrepancy in screw_bag component layout violating standard factory tolerances.",
+  "severity_level": "MAJOR",
+  "factory_action_recommendation": "Reroute item to inspection buffer for manual component verification."
+}
