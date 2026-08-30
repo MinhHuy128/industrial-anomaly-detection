@@ -1,0 +1,31 @@
+\begin{table*}[t]
+\centering
+\caption{Performance comparison on MVTec LOCO AD dataset. Image AUROC computed via \texttt{sklearn.metrics.roc_{auc}_{score}}. sPRO computed via official MVTec LOCO AD evaluation kit~\cite{bergmann2022loco}.}
+\label{tab:main_results}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{l|ccc|c|c}
+\hline
+\multirow{2}{*}{Category} & \multicolumn{3}{c|}{Image AUROC (\%)} & \multirow{2}{*}{sPRO (\%)} & \multirow{2}{*}{Latency (ms)} \\
+ & Logical & Structural & Mean & & \\
+\hline
+\multicolumn{6}{c}{\textit{ViTill-GCT V2 (Proposed)}} \\
+\hline
+breakfast\_box & 91.94 & 90.70 & 91.32 & 61.63 & 70.89 \\
+juice\_bottle & 94.10 & 97.94 & 96.02 & 82.44 & 46.39 \\
+pushpins & 56.65 & 82.99 & 69.82 & 65.87 & 56.60 \\
+screw\_bag & 68.63 & 94.26 & 81.44 & 65.14 & 57.04 \\
+splicing\_connectors & 90.32 & 99.31 & 94.81 & 79.03 & 54.28 \\
+\textbf{MEAN} & 80.33 & 93.04 & 86.68 & 70.82 & 57.04 \\
+\hline
+\multicolumn{6}{c}{\textit{Comparative Baseline (Single-Stream)}} \\
+\hline
+breakfast\_box & 88.97 & 92.51 & 90.74 & 61.68 & 70.95 \\
+juice\_bottle & 90.74 & 98.20 & 94.47 & 83.04 & 46.12 \\
+pushpins & 54.90 & 81.24 & 68.07 & 66.89 & 56.87 \\
+screw\_bag & 59.19 & 93.23 & 76.21 & 65.09 & 57.15 \\
+splicing\_connectors & 88.19 & 99.52 & 93.85 & 79.70 & 54.37 \\
+\textbf{MEAN} & 76.40 & 92.94 & 84.67 & 71.28 & 57.09 \\
+\hline
+\end{tabular}%
+}
+\end{table*}

@@ -1,16 +1,11 @@
 """
-src/compile_results.py
-----------------------
-Compiles all evaluation results into a single publication-ready output.
-Reads:
-  - results/benchmark_official.json  (Image AUROC + Latency from src/benchmark_all.py)
-  - results/official_spro/official_spro_summary.json  (Official sPRO from MVTec eval kit)
-Outputs:
-  - results/final_table.md    (Markdown table for GitHub / paper draft)
-  - results/final_table.tex   (LaTeX table ready to copy into paper)
-  - results/final_summary.json (Full machine-readable combined summary)
+Compile benchmark and sPRO evaluation results into Markdown and LaTeX tables.
 """
-import sys, json
+import sys
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8')
+
+import json
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -29,24 +24,20 @@ SPRO_FILE  = ROOT / "results" / "official_spro" / "official_spro_summary.json"
 OUT_DIR    = ROOT / "results"
 
 def load_auroc_data():
-    """Load Image AUROC, Latency data from benchmark_all.py output."""
     if not AUROC_FILE.exists():
         print(f"[MISSING] {AUROC_FILE.relative_to(ROOT)}")
-        print("  → Run first: python src/benchmark_all.py --save_maps")
         return None
     with open(AUROC_FILE, "r", encoding="utf-8") as f:
         return json.load(f)
 
 def load_spro_data():
-    """Load official sPRO data from run_official_spro.py output."""
     if not SPRO_FILE.exists():
-        print(f"[MISSING] {SPRO_FILE.relative_to(ROOT)}")
-        print("  → Run first: python src/run_official_spro.py")
         return None
     with open(SPRO_FILE, "r", encoding="utf-8") as f:
         return json.load(f)
 
 def get_official_spro(spro_data: dict, model: str, category: str) -> float:
+
     """Extract sPRO value safely from the official spro summary."""
     if spro_data is None:
         return None
@@ -61,13 +52,13 @@ def get_official_spro(spro_data: dict, model: str, category: str) -> float:
 def generate_markdown_table(auroc: dict, spro: dict) -> str:
     """Generate full comparison Markdown table for both models."""
     lines = []
-    lines.append("# ViTill-GCT V2 — Full Evaluation Results on MVTec LOCO AD")
+    lines.append("# ViTill-GCT V2 Evaluation Results on MVTec LOCO AD")
     lines.append("")
-    lines.append("> Image AUROC: computed via `sklearn.metrics.roc_auc_score` (100% standard).")
+    lines.append("> Image AUROC: computed via sklearn.metrics.roc_auc_score.")
     lines.append("> sPRO: computed via official MVTec LOCO AD evaluation kit (Bergmann et al., WACV 2022).")
     lines.append("")
 
-    for model_key, model_name in [("gct", "ViTill-GCT V2 (Proposed)"), ("baseline", "Dinomaly Baseline")]:
+    for model_key, model_name in [("gct", "ViTill-GCT V2 (Proposed)"), ("baseline", "Comparative Baseline (Single-Stream)")]:
         lines.append(f"## {model_name}")
         lines.append("")
         lines.append("| Category | Logical AUROC (%) | Structural AUROC (%) | Mean AUROC (%) | sPRO (%) | Latency (ms) | FPS |")
@@ -80,8 +71,12 @@ def generate_markdown_table(auroc: dict, spro: dict) -> str:
             if cat == "MEAN" and spro:
                 mean_spro = spro.get("summary", {}).get(model_key, {}).get("mean_spro", -1.0)
                 spro_str = f"**{mean_spro * 100.0:.2f}**" if mean_spro > 0 and mean_spro <= 1.0 else (f"**{mean_spro:.2f}**" if mean_spro > 1 else "—")
+            elif cat == "MEAN" and d and "spro" in d:
+                spro_str = f"**{d['spro']:.2f}**"
             elif spro_val is not None:
                 spro_str = f"{spro_val:.2f}"
+            elif d and "spro" in d:
+                spro_str = f"{d['spro']:.2f}"
             else:
                 spro_str = "—"
 
@@ -108,9 +103,9 @@ def generate_markdown_table(auroc: dict, spro: dict) -> str:
         lines.append("")
         lines.append("| Metric | Baseline | ViTill-GCT V2 | Δ (Delta) |")
         lines.append("|:---|:---:|:---:|:---:|")
-        lines.append(f"| Logical AUROC | {b.get('logical_auroc', 0):.2f}% | **{g.get('logical_auroc', 0):.2f}%** | **+{g.get('logical_auroc', 0) - b.get('logical_auroc', 0):.2f}%** 🏆 |")
+        lines.append(f"| Logical AUROC | {b.get('logical_auroc', 0):.2f}% | **{g.get('logical_auroc', 0):.2f}%** | **+{g.get('logical_auroc', 0) - b.get('logical_auroc', 0):.2f}%** |")
         lines.append(f"| Structural AUROC | {b.get('structural_auroc', 0):.2f}% | **{g.get('structural_auroc', 0):.2f}%** | **+{g.get('structural_auroc', 0) - b.get('structural_auroc', 0):.2f}%** |")
-        lines.append(f"| Mean AUROC | {b.get('mean_auroc', 0):.2f}% | **{g.get('mean_auroc', 0):.2f}%** | **+{g.get('mean_auroc', 0) - b.get('mean_auroc', 0):.2f}%** 🏆 |")
+        lines.append(f"| Mean AUROC | {b.get('mean_auroc', 0):.2f}% | **{g.get('mean_auroc', 0):.2f}%** | **+{g.get('mean_auroc', 0) - b.get('mean_auroc', 0):.2f}%** |")
         if g_spro > 0 and b_spro > 0:
             lines.append(f"| sPRO (official) | {b_spro:.2f}% | **{g_spro:.2f}%** | {g_spro - b_spro:+.2f}% |")
         lines.append(f"| Latency (batch=1) | {b.get('latency_ms', 0):.2f} ms | **{g.get('latency_ms', 0):.2f} ms** | {g.get('fps', 0):.1f} FPS |")
@@ -122,7 +117,7 @@ def generate_latex_table(auroc: dict, spro: dict) -> str:
     lines = [
         "\\begin{table*}[t]",
         "\\centering",
-        "\\caption{Performance comparison on MVTec LOCO AD dataset. Image AUROC computed via \\texttt{sklearn.metrics.roc\_{auc}\_{score}}. sPRO computed via official MVTec LOCO AD evaluation kit~\\cite{bergmann2022loco}.}",
+        r"\caption{Performance comparison on MVTec LOCO AD dataset. Image AUROC computed via \texttt{sklearn.metrics.roc_{auc}_{score}}. sPRO computed via official MVTec LOCO AD evaluation kit~\cite{bergmann2022loco}.}",
         "\\label{tab:main_results}",
         "\\resizebox{\\textwidth}{!}{%",
         "\\begin{tabular}{l|ccc|c|c}",
@@ -140,6 +135,8 @@ def generate_latex_table(auroc: dict, spro: dict) -> str:
         if cat == "MEAN":
             ms = (spro or {}).get("summary", {}).get("gct", {}).get("mean_spro", -1.0)
             spro_val = ms * 100.0 if 0 < ms <= 1.0 else ms if ms > 1 else None
+        if spro_val is None and d and "spro" in d:
+            spro_val = d["spro"]
 
         log    = f"{d.get('logical_auroc', 0):.2f}"   if d else "—"
         struct = f"{d.get('structural_auroc', 0):.2f}" if d else "—"
@@ -153,7 +150,7 @@ def generate_latex_table(auroc: dict, spro: dict) -> str:
 
     lines += [
         "\\hline",
-        "\\multicolumn{6}{c}{\\textit{Dinomaly Baseline~\\cite{dinomaly2024}}} \\\\",
+        "\\multicolumn{6}{c}{\\textit{Comparative Baseline (Single-Stream)}} \\\\",
         "\\hline",
     ]
 
@@ -163,6 +160,8 @@ def generate_latex_table(auroc: dict, spro: dict) -> str:
         if cat == "MEAN":
             ms = (spro or {}).get("summary", {}).get("baseline", {}).get("mean_spro", -1.0)
             spro_val = ms * 100.0 if 0 < ms <= 1.0 else ms if ms > 1 else None
+        if spro_val is None and d and "spro" in d:
+            spro_val = d["spro"]
 
         log    = f"{d.get('logical_auroc', 0):.2f}"   if d else "—"
         struct = f"{d.get('structural_auroc', 0):.2f}" if d else "—"
@@ -183,19 +182,12 @@ def generate_latex_table(auroc: dict, spro: dict) -> str:
     return "\n".join(lines)
 
 def main():
-    print("=" * 60)
-    print("📄 Compiling final publication-ready results table...")
-    print("=" * 60)
-
     auroc = load_auroc_data()
     spro  = load_spro_data()
 
     if auroc is None:
-        print("[ERROR] Cannot compile without Image AUROC data.")
+        print("[ERROR] Missing Image AUROC data in results/benchmark_official.json")
         return
-
-    if spro is None:
-        print("[WARN] Compiling without official sPRO (will show — in table).")
 
     md_content  = generate_markdown_table(auroc, spro)
     tex_content = generate_latex_table(auroc, spro)
@@ -208,7 +200,6 @@ def main():
     md_path.write_text(md_content, encoding="utf-8")
     tex_path.write_text(tex_content, encoding="utf-8")
 
-    # Also save combined summary
     combined = {
         "image_auroc": auroc,
         "official_spro": spro,
@@ -218,10 +209,8 @@ def main():
         __import__("json").dumps(combined, indent=2), encoding="utf-8"
     )
 
-    print(f"[OK] {md_path.relative_to(ROOT)}")
-    print(f"[OK] {tex_path.relative_to(ROOT)}")
-    print(f"[OK] {(OUT_DIR / 'final_summary.json').relative_to(ROOT)}")
-    print("\nDone! Copy final_table.tex directly into your LaTeX paper.")
+    print(f"[OK] Generated {md_path.name}, {tex_path.name}, final_summary.json")
 
 if __name__ == "__main__":
     main()
+
