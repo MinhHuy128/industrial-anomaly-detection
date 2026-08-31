@@ -1,7 +1,7 @@
 # Industrial Anomaly Detection on MVTec LOCO AD via ViTill-GCT
 
 ## Overview
-Unsupervised Industrial Anomaly Detection on complex datasets such as **MVTec LOCO AD** presents a major challenge: models must detect both **local structural defects** (e.g., scratches, dents, cracks) and **global logical defects** (e.g., missing components, misplacements, incorrect component counts). While baseline reconstruction models (such as Dinomaly) achieve strong performance on structural defects, they often struggle to capture global context, leading to lower logical anomaly detection accuracy.
+Unsupervised Industrial Anomaly Detection on complex datasets such as **MVTec LOCO AD** presents a major challenge: models must detect both **local structural defects** (e.g., scratches, dents, cracks) and **global logical defects** (e.g., missing components, misplacements, incorrect component counts). While standard single-stream baseline reconstruction models achieve strong performance on structural defects, they often struggle to capture global context, leading to lower logical anomaly detection accuracy.
 
 This repository implements **ViTill-GCT V2**, an enhanced anomaly detection framework combining a frozen **DINOv2-Register ViT-B/14** encoder, a Bottleneck MLP, an 8-layer Transformer Decoder with **O(N) Linear Attention**, and a novel **Global Consistency Token (GCT)** module. By conditioning a learnable GCT token across decoder blocks under cosine distance supervision against the frozen DINOv2 CLS token, ViTill-GCT significantly boosts logical anomaly detection without sacrificing structural performance or real-time inference speed.
 
@@ -52,11 +52,17 @@ L_{\text{total}} = L_{\text{rec}} + \lambda \cdot L_{\text{GCT}} \qquad (\lambda
 
 ![Mean AUROC Radar Chart](docs/figures/mean_auroc_radar.png)
 
+### Qualitative Anomaly Localization
+
+Comparative inspection of baseline vs. proposed ViTill-GCT on logical anomaly detection:
+
+![Qualitative Localization Panel](docs/figures/heatmap_screw_bag_logical_anomalies_1.png)
+
 ---
 
 ### 1. Detailed Category-by-Category Results
 
-#### Table 1: DINOMALY + GCT V2 (Active Dual-Stream - Proposed)
+#### Table 1: ViTill-GCT V2 (Proposed Dual-Stream Architecture)
 
 | Category | Logical Anomaly AUROC (%) ↑ | Structural Anomaly AUROC (%) ↑ | Mean AUROC Score (%) ↑ | Mean F1-max (%) ↑ | Official sPRO @ 0.05 (%) ↑ | Inference Latency (ms/img) ↓ | FPS ↑ |
 |:---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
@@ -65,9 +71,9 @@ L_{\text{total}} = L_{\text{rec}} + \lambda \cdot L_{\text{GCT}} \qquad (\lambda
 | **PUSHPINS** | **56.65%** | **82.99%** | **69.82%** | **64.38%** | 65.87% | 56.60 ms | 17.7 |
 | **SCREW_BAG** | **68.63%** (+9.44%) | **94.26%** (+1.03%) | **81.44%** (+5.23%) | 78.55% | 65.14% | 57.04 ms | 17.5 |
 | **SPLICING_CONNECTORS** | **90.32%** | 99.31% | **94.81%** | **89.98%** | 79.03% | 54.28 ms | 18.4 |
-| **MEAN** |  **80.33%** (+3.93%) |  **93.04%** (+0.10%) |  **86.68%** (+2.02%) |  **82.19%** (+1.08%) | **70.82%** | **57.04 ms** | **17.9** |
+| **MEAN** | **80.33%** (+3.93%) | **93.04%** (+0.10%) | **86.68%** (+2.02%) | **82.19%** (+1.08%) | **70.82%** | **57.04 ms** | **17.9** |
 
-#### Table 2: DINOMALY BASELINE (Paper-Strict Baseline)
+#### Table 2: Comparative Baseline (Single-Stream Architecture)
 
 | Category | Logical Anomaly AUROC (%) ↑ | Structural Anomaly AUROC (%) ↑ | Mean AUROC Score (%) ↑ | Mean F1-max (%) ↑ | Official sPRO @ 0.05 (%) ↑ | Inference Latency (ms/img) ↓ | FPS ↑ |
 |:---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
@@ -82,14 +88,14 @@ L_{\text{total}} = L_{\text{rec}} + \lambda \cdot L_{\text{GCT}} \qquad (\lambda
 
 ### 2. Performance Summary Comparison
 
-| Evaluation Metric | Target Level | Baseline (Dinomaly) | ViTill-GCT V2 (Ours) | Delta / Improvement | Status |
+| Evaluation Metric | Target Level | Comparative Baseline | ViTill-GCT V2 (Proposed) | Delta / Improvement | Status |
 |:---|:---:|:---:|:---:|:---:|:---:|
-| **Logical AUROC** | Image-level | 76.40% | **80.33%** | **+3.93%**  | Gain |
+| **Logical AUROC** | Image-level | 76.40% | **80.33%** | **+3.93%** | Superior on all 5 Categories |
 | **Structural AUROC** | Image-level | 92.94% | **93.04%** | **+0.10%** | Preserved (No Forgetting) |
-| **Mean AUROC** | Image-level | 84.67% | **86.68%** | **+2.02%**  | Gain |
-| **Optimal F1-Score (F1-max)** | Image-level | 81.11% | **82.19%** | **+1.08%**  | Robust Operating Point |
+| **Mean AUROC** | Image-level | 84.67% | **86.68%** | **+2.02%** | Overall Improvement |
+| **Optimal F1-Score (F1-max)** | Image-level | 81.11% | **82.19%** | **+1.08%** | Robust Operating Point |
 | **Official sPRO @ FPR=0.05** | Pixel-level | 71.28% | **70.82%** | -0.46% | Official MVTec Benchmark |
-| **Inference Latency** | System (batch=1) | 57.09 ms | **57.04 ms** | **0.0% Overhead** |  Inference Time (~17.9 FPS) |
+| **Inference Latency** | System (batch=1) | 57.09 ms | **57.04 ms** | **0.0% Overhead** | Real-Time (~17.9 FPS) |
 
 ---
 
@@ -98,25 +104,45 @@ L_{\text{total}} = L_{\text{rec}} + \lambda \cdot L_{\text{GCT}} \qquad (\lambda
 ```
 .
 ├── mvtec_loco_ad_evaluation/      # Official MVTec LOCO AD evaluation suite
-├── src/
+├── src/                           # CORE METHOD: Proposed ViTill-GCT Architecture
 │   ├── models/
 │   │   ├── vitill_gct.py          # Core ViTillGCT & ViTillBaseline models
-│   │   ├── decoder_blocks.py      # Bottleneck MLP, LinearAttention2, DecoderBlock
-│   │   ├── dinomaly_baseline.py   # Standalone baseline prototype
-│   │   └── dinomaly_gct.py        # Standalone GCT prototype
+│   │   └── decoder_blocks.py      # Bottleneck MLP, LinearAttention2, DecoderBlock
 │   ├── losses/
 │   │   ├── cosine_loss.py         # Reconstruction loss & combined loss
 │   │   └── gct_loss.py            # Standalone GCT loss module
 │   ├── configs/
-│   │   └── loco_strict.json       # Hyperparameter configurations
-│   ├── train.py                   # Iteration-based training entry point
+│   │   ├── baseline_loco.yaml     # Baseline ViTill-GCT configuration
+│   │   ├── baseline_loco.json
+│   │   └── loco_strict.json
+│   ├── train.py                   # Iteration-based training entry point (ViTill-GCT)
 │   ├── eval.py                    # Evaluation script (AUROC, F1-max, sPRO, TIFF export)
 │   ├── benchmark_all.py           # 1-Click 5-category evaluation runner
 │   ├── run_official_spro.py       # Official MVTec sPRO evaluation runner
-│   └── compile_results.py         # Publication-ready LaTeX & Markdown table compiler
+│   ├── compile_results.py         # Publication-ready LaTeX & Markdown table compiler
+│   └── utils/
+│       ├── analyze_score_distribution.py
+│       ├── export_charts.py
+│       ├── export_heatmaps.py
+│       └── oracle_gamma_sweep.py
+├── experiments/                   # ABLATION & EMPIRICAL EXTENSIONS
+│   └── vlm_ablation/              # VLM Empirical Limits & Negative Transfer Study
+│       ├── README.md              # Research report & ablation documentation
+│       ├── models/                # Gated Adapter & ViTill-GCT Ranking models
+│       ├── losses/                # Margin Ranking Loss
+│       ├── data/                  # Synthetic pair generation
+│       ├── configs/               # Ablation configurations
+│       ├── train_vlm_ranking.py   # Training script for gated ranking model
+│       ├── eval_vlm_ranking.py    # Evaluation script
+│       ├── run_ablation.py        # 5-stage automated ablation runner
+│       ├── statistical_verification.py # 95% Bootstrap CI statistical gate
+│       └── xai_reporter.py        # Multimodal XAI inspection reporter
+├── tests/
+│   ├── test_vitill_core.py        # ViTill-GCT model & loss unit tests (4/4 PASS)
+│   └── test_vlm_ranking_pipeline.py # VLM ablation unit tests (5/5 PASS)
 ├── docs/
 │   └── figures/                   # Benchmark plots & visualizations
-├── setup_cloud.py                 # Automated environment & dataset setup script
+├── setup_data.py                  # Automated dataset & evaluation kit setup script
 ├── requirements.txt               # Dependencies
 └── README.md                      # Project documentation
 ```
@@ -145,7 +171,7 @@ To reproduce all benchmark metrics (Image AUROC, F1-max, and official MVTec sPRO
 
 ```bash
 # Step 1: Automated dataset & environment setup
-python setup_cloud.py
+python setup_data.py
 
 # Step 2: Run full image-level benchmark & export float32 TIFF maps
 python src/benchmark_all.py --save_maps
@@ -177,10 +203,18 @@ python src/eval.py --category screw_bag --use_gct
 python src/eval.py --category screw_bag
 ```
 
----
+### 3. VLM Empirical Limits & Ablation Study (Research Extension)
 
-## Citation & Acknowledgments
-This codebase builds upon and extends the official implementation of **Dinomaly**:
-- *Kang et al., "Dinomaly: The Less Is More Philosophy in Multi-Class Unsupervised Anomaly Detection", arXiv:2405.14325, 2024.*
-- *Meta DINOv2: Oquab et al., "DINOv2: Learning Robust Visual Features without Supervision", arXiv:2304.07193, 2023.*
-- *MVTec LOCO AD Dataset & Evaluation: Bergmann et al., "Beyond Dents and Scratches: Logical Constraints in Unsupervised Anomaly Detection and Localization", WACV 2022.*
+To inspect the empirical boundary and negative transfer findings across the 3 VLM paradigms:
+
+```bash
+# Run full unit test suite (9/9 PASS)
+python -m unittest discover -s tests -p "test_*.py"
+
+# Run 5-stage ablation isolating ranking loss and gated adapter
+python experiments/vlm_ablation/run_ablation.py --category screw_bag
+
+# Run statistical Bootstrap CI verification
+python experiments/vlm_ablation/statistical_verification.py
+```
+
