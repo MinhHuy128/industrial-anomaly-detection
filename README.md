@@ -166,6 +166,27 @@ pip install -r requirements.txt
 
 ## Usage Instructions
 
+### Pretrained Model Checkpoints
+To evaluate the trained models directly without retraining from scratch, download the official checkpoints:
+* **Google Drive:** [Pretrained Weights (ViTill-GCT V2 & Baseline)](https://drive.google.com/drive/folders/1UcwILH7Kx7TboyY_cHRWhTUkMkPfDPS6?usp=sharing)
+
+Place the downloaded `.pth` files into the following directory layout:
+```
+experiments/
+├── gct/
+│   ├── gct_breakfast_box_strict.pth
+│   ├── gct_juice_bottle_strict.pth
+│   ├── gct_pushpins_strict.pth
+│   ├── gct_screw_bag_strict.pth
+│   └── gct_splicing_connectors_strict.pth
+└── baseline/
+    ├── baseline_breakfast_box_strict.pth
+    ├── baseline_juice_bottle_strict.pth
+    ├── baseline_pushpins_strict.pth
+    ├── baseline_screw_bag_strict.pth
+    └── baseline_splicing_connectors_strict.pth
+```
+
 ### 1. Automated 1-Click Evaluation Pipeline
 To reproduce all benchmark metrics (Image AUROC, F1-max, and official MVTec sPRO) across all 5 categories:
 
