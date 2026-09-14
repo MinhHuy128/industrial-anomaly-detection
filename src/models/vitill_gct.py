@@ -130,11 +130,8 @@ class ViTillGCT(nn.Module):
         return torch.stack(selected, dim=0).mean(dim=0)
 
     def forward(self, feat_list: list, cls_token: torch.Tensor):
-        # fuse encoder layers and pass through bottleneck
         x = self.fuse_features(feat_list, list(range(len(feat_list))))
         x = self.bottleneck(x)
-
-        # prepend GCT token at position 0
         x = self.gct.prepend(x)
 
         de_list = []
@@ -142,13 +139,11 @@ class ViTillGCT(nn.Module):
             x = blk(x)
             de_list.append(x[:, 1:, :])
 
-        # GCT token is at index 0
         gct_final = x[:, 0, :]
         gct_loss  = self.gct.compute_loss(gct_final, cls_token)
 
         de_list = de_list[::-1]
 
-        # reshape feature maps back to spatial grid
         N = feat_list[0].shape[1]
         side = int(math.sqrt(N))
         B, _, C = feat_list[0].shape

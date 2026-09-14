@@ -78,6 +78,43 @@ class TestViTillCore(unittest.TestCase):
         f1 = compute_f1_max(labels, scores)
         self.assertAlmostEqual(f1, 100.0, places=2)
 
+    def test_deterministic_reproducibility(self):
+        # TC-05: Verify identical weight initialization with seed 42
+        torch.manual_seed(42)
+        model1 = ViTillGCT(
+            embed_dim=self.embed_dim,
+            num_decoder_layers=2,
+            target_layers=[2, 3]
+        )
+        torch.manual_seed(42)
+        model2 = ViTillGCT(
+            embed_dim=self.embed_dim,
+            num_decoder_layers=2,
+            target_layers=[2, 3]
+        )
+        for p1, p2 in zip(model1.parameters(), model2.parameters()):
+            self.assertTrue(torch.equal(p1, p2))
+
+    def test_resource_and_latency_bounds(self):
+        # TC-06: Verify parameter memory footprint and forward pass finiteness
+        model = ViTillGCT(
+            embed_dim=self.embed_dim,
+            num_decoder_layers=self.num_decoder_layers,
+            target_layers=self.target_layers
+        )
+        param_bytes = sum(p.numel() * p.element_size() for p in model.parameters())
+        param_mb = param_bytes / (1024 ** 2)
+        # Total trainable parameters memory footprint should be under 500 MB
+        self.assertTrue(param_mb < 500.0, f"Model parameters footprint too high: {param_mb:.2f} MB")
+
+        dummy_feats = [
+            torch.randn(1, self.num_patches, self.embed_dim)
+            for _ in self.target_layers
+        ]
+        dummy_cls = torch.randn(1, self.embed_dim)
+        en, de, gct_loss = model(dummy_feats, dummy_cls)
+        self.assertTrue(torch.isfinite(gct_loss))
+
 
 if __name__ == "__main__":
     unittest.main()

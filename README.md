@@ -64,18 +64,18 @@ Comparative inspection of baseline vs. proposed ViTill-GCT on logical anomaly de
 
 #### Table 1: ViTill-GCT V2 (Proposed Dual-Stream Architecture)
 
-| Category | Logical Anomaly AUROC (%) ↑ | Structural Anomaly AUROC (%) ↑ | Mean AUROC Score (%) ↑ | Mean F1-max (%) ↑ | Official sPRO @ 0.05 (%) ↑ | Inference Latency (ms/img) ↓ | FPS ↑ |
+| Category | Logical Anomaly AUROC (%) ↑ | Structural Anomaly AUROC (%) ↑ | Mean AUROC Score (%) ↑ | Mean F1-max (%) ↑ | Official sPRO @ FPR ≤ 0.30 (%) ↑ | Inference Latency (ms/img) ↓ | FPS ↑ |
 |:---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
 | **BREAKFAST_BOX** | **91.94%** | 90.70% | **91.32%** | **86.66%** | 61.63% | 70.89 ms | 14.1 |
 | **JUICE_BOTTLE** | **94.10%** | 97.94% | **96.02%** | **91.35%** | 82.44% | 46.39 ms | 21.6 |
 | **PUSHPINS** | **56.65%** | **82.99%** | **69.82%** | **64.38%** | 65.87% | 56.60 ms | 17.7 |
 | **SCREW_BAG** | **68.63%** (+9.44%) | **94.26%** (+1.03%) | **81.44%** (+5.23%) | 78.55% | 65.14% | 57.04 ms | 17.5 |
 | **SPLICING_CONNECTORS** | **90.32%** | 99.31% | **94.81%** | **89.98%** | 79.03% | 54.28 ms | 18.4 |
-| **MEAN** | **80.33%** (+3.93%) | **93.04%** (+0.10%) | **86.68%** (+2.02%) | **82.19%** (+1.08%) | **70.82%** | **57.04 ms** | **17.9** |
+| **MEAN** | **80.33%** (+3.93%) | **93.04%** (+0.10%) | **86.68%** (+2.01%) | **82.19%** (+1.08%) | **70.82%** | **57.04 ms** | **17.9** |
 
 #### Table 2: Comparative Baseline (Single-Stream Architecture)
 
-| Category | Logical Anomaly AUROC (%) ↑ | Structural Anomaly AUROC (%) ↑ | Mean AUROC Score (%) ↑ | Mean F1-max (%) ↑ | Official sPRO @ 0.05 (%) ↑ | Inference Latency (ms/img) ↓ | FPS ↑ |
+| Category | Logical Anomaly AUROC (%) ↑ | Structural Anomaly AUROC (%) ↑ | Mean AUROC Score (%) ↑ | Mean F1-max (%) ↑ | Official sPRO @ FPR ≤ 0.30 (%) ↑ | Inference Latency (ms/img) ↓ | FPS ↑ |
 |:---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
 | **BREAKFAST_BOX** | 88.97% | 92.51% | 90.74% | 85.04% | 61.68% | 70.95 ms | 14.1 |
 | **JUICE_BOTTLE** | 90.74% | 98.20% | 94.47% | 90.39% | 83.04% | 46.12 ms | 21.7 |
@@ -92,9 +92,9 @@ Comparative inspection of baseline vs. proposed ViTill-GCT on logical anomaly de
 |:---|:---:|:---:|:---:|:---:|:---:|
 | **Logical AUROC** | Image-level | 76.40% | **80.33%** | **+3.93%** | Superior on all 5 Categories |
 | **Structural AUROC** | Image-level | 92.94% | **93.04%** | **+0.10%** | Preserved (No Forgetting) |
-| **Mean AUROC** | Image-level | 84.67% | **86.68%** | **+2.02%** | Overall Improvement |
+| **Mean AUROC** | Image-level | 84.67% | **86.68%** | **+2.01%** | Overall Improvement |
 | **Optimal F1-Score (F1-max)** | Image-level | 81.11% | **82.19%** | **+1.08%** | Robust Operating Point |
-| **Official sPRO @ FPR=0.05** | Pixel-level | 71.28% | **70.82%** | -0.46% | Official MVTec Benchmark |
+| **Official sPRO @ FPR ≤ 0.30** | Pixel-level | 71.28% | **70.82%** | -0.46% | Official MVTec Benchmark |
 | **Inference Latency** | System (batch=1) | 57.09 ms | **57.04 ms** | **0.0% Overhead** | Real-Time (~17.9 FPS) |
 
 ---
@@ -138,7 +138,7 @@ Comparative inspection of baseline vs. proposed ViTill-GCT on logical anomaly de
 │       ├── statistical_verification.py # 95% Bootstrap CI statistical gate
 │       └── xai_reporter.py        # Multimodal XAI inspection reporter
 ├── tests/
-│   ├── test_vitill_core.py        # ViTill-GCT model & loss unit tests (4/4 PASS)
+│   ├── test_vitill_core.py        # ViTill-GCT model & loss unit tests (6/6 PASS)
 │   └── test_vlm_ranking_pipeline.py # VLM ablation unit tests (5/5 PASS)
 ├── docs/
 │   └── figures/                   # Benchmark plots & visualizations
@@ -229,7 +229,7 @@ python src/eval.py --category screw_bag
 To inspect the empirical boundary and negative transfer findings across the 3 VLM paradigms:
 
 ```bash
-# Run full unit test suite (9/9 PASS)
+# Run full unit test suite (11/11 PASS)
 python -m unittest discover -s tests -p "test_*.py"
 
 # Run 5-stage ablation isolating ranking loss and gated adapter
