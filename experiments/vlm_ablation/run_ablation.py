@@ -112,7 +112,7 @@ def run_ablation_study(
 def main():
     parser = argparse.ArgumentParser(description="Run 5-stage ablation study for VLM ranking & gated adapter.")
     parser.add_argument("--config", type=str, default="experiments/vlm_ablation/configs/vlm_ranking_loco.yaml", help="Path to YAML config")
-    parser.add_argument("--categories", nargs="+", default=["pushpins", "screw_bag"], help="Categories to test")
+    parser.add_argument("--categories", "--category", nargs="+", default=["pushpins", "screw_bag"], help="Categories to test (accepts one or more category names)")
     parser.add_argument("--all", action="store_true", help="Run across all 5 MVTec LOCO categories")
     parser.add_argument("--iters", type=int, default=5000, help="Training iterations per mode")
     parser.add_argument("--device", type=str, default="cuda" if sys.platform != "darwin" else "cpu")
